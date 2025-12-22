@@ -63,7 +63,7 @@ bm3dmetal.BM3D(clip clip[, clip ref=None, float[] sigma=3.0, int[] block_step=8,
     ```
 
 - sigma:
-    The strength of denoising for each plane.
+    The strength of denoising for each plane, defined as the standard deviation of the AWGN component, implying $Noise \sim \mathcal{N}(0, \sigma^2)$ on a $0\text{-}255$ scale.
 
     The strength is similar (but not strictly equal) as `VapourSynth-BM3D` due to differences in implementation. (coefficient normalization is not implemented, for example)
 

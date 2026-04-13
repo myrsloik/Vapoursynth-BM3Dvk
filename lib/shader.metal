@@ -742,18 +742,18 @@ DECLARE_BM3D_KERNEL(bm3d_true_false_true, true, false, true)
 DECLARE_BM3D_KERNEL(bm3d_true_true_false, true, true, false)
 DECLARE_BM3D_KERNEL(bm3d_true_true_true, true, true, true)
 
-kernel void copy_kernel(device const char *src [[buffer(0)]],
-                        device char *dst [[buffer(1)]],
-                        constant uint &src_stride_bytes [[buffer(2)]],
-                        constant uint &dst_stride_bytes [[buffer(3)]],
-                        constant uint &width_bytes [[buffer(4)]],
+kernel void copy_kernel(device const float *src [[buffer(0)]],
+                        device float *dst [[buffer(1)]],
+                        constant uint &src_stride [[buffer(2)]],
+                        constant uint &dst_stride [[buffer(3)]],
+                        constant uint &width [[buffer(4)]],
                         uint2 tid [[thread_position_in_grid]]) {
-    if (tid.x >= width_bytes) {
+    if (tid.x >= width) {
         return;
     }
 
-    ulong src_offset = (ulong)tid.y * src_stride_bytes + tid.x;
-    ulong dst_offset = (ulong)tid.y * dst_stride_bytes + tid.x;
+    ulong src_offset = (ulong)tid.y * src_stride + tid.x;
+    ulong dst_offset = (ulong)tid.y * dst_stride + tid.x;
 
     dst[dst_offset] = src[src_offset];
 }

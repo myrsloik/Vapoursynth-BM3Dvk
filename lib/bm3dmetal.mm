@@ -21,6 +21,7 @@
 #import <Accelerate/Accelerate.h>
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#include <iostream>
 
 #include <algorithm>
 #include <array>
@@ -39,17 +40,18 @@
 #include <utility>
 #include <vector>
 
-#include <VSHelper.h>
-#include <VapourSynth.h>
+#include <VSHelper4.h>
+#include <VapourSynth4.h>
 
 using namespace std::string_literals;
 
 static inline void encode_copy_from_vs(id<MTLComputeCommandEncoder> encoder,
                                        id<MTLDevice> device,
                                        const void* src_ptr, size_t src_len,
-                                       uint src_stride, id<MTLBuffer> dst_buf,
-                                       size_t dst_offset, uint dst_stride,
-                                       uint width_bytes, uint height) {
+                                       uint src_stride_bytes,
+                                       id<MTLBuffer> dst_buf, size_t dst_offset,
+                                       uint dst_stride_bytes, uint width_floats,
+                                       uint height) {
     id<MTLBuffer> src_buf =
         // NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast)
         [device newBufferWithBytesNoCopy:const_cast<void*>(src_ptr)
@@ -59,12 +61,14 @@ static inline void encode_copy_from_vs(id<MTLComputeCommandEncoder> encoder,
 
     [encoder setBuffer:src_buf offset:0 atIndex:0];
     [encoder setBuffer:dst_buf offset:dst_offset atIndex:1];
+    uint src_stride = src_stride_bytes / sizeof(float);
+    uint dst_stride = dst_stride_bytes / sizeof(float);
     [encoder setBytes:&src_stride length:sizeof(uint) atIndex:2];
     [encoder setBytes:&dst_stride length:sizeof(uint) atIndex:3];
-    [encoder setBytes:&width_bytes length:sizeof(uint) atIndex:4];
+    [encoder setBytes:&width_floats length:sizeof(uint) atIndex:4];
 
-    MTLSize grid = MTLSizeMake(width_bytes, height, 1);
-    MTLSize group = MTLSizeMake(std::min((int)width_bytes, 32),
+    MTLSize grid = MTLSizeMake(width_floats, height, 1);
+    MTLSize group = MTLSizeMake(std::min((int)width_floats, 32),
                                 std::min((int)height, 32), 1);
     [encoder dispatchThreads:grid threadsPerThreadgroup:group];
 }
@@ -72,9 +76,9 @@ static inline void encode_copy_from_vs(id<MTLComputeCommandEncoder> encoder,
 static inline void encode_copy_to_vs(id<MTLComputeCommandEncoder> encoder,
                                      id<MTLDevice> device,
                                      id<MTLBuffer> src_buf, size_t src_offset,
-                                     uint src_stride, void* dst_ptr,
+                                     uint src_stride_bytes, void* dst_ptr,
                                      size_t dst_len, uint dst_stride,
-                                     uint width_bytes, uint height) {
+                                     uint width_floats, uint height) {
     id<MTLBuffer> dst_buf =
         [device newBufferWithBytesNoCopy:dst_ptr
                                   length:dst_len
@@ -83,12 +87,14 @@ static inline void encode_copy_to_vs(id<MTLComputeCommandEncoder> encoder,
 
     [encoder setBuffer:src_buf offset:src_offset atIndex:0];
     [encoder setBuffer:dst_buf offset:0 atIndex:1];
+    uint src_stride = src_stride_bytes / sizeof(float);
+    uint dst_stride_floats = dst_stride / sizeof(float);
     [encoder setBytes:&src_stride length:sizeof(uint) atIndex:2];
-    [encoder setBytes:&dst_stride length:sizeof(uint) atIndex:3];
-    [encoder setBytes:&width_bytes length:sizeof(uint) atIndex:4];
+    [encoder setBytes:&dst_stride_floats length:sizeof(uint) atIndex:3];
+    [encoder setBytes:&width_floats length:sizeof(uint) atIndex:4];
 
-    MTLSize grid = MTLSizeMake(width_bytes, height, 1);
-    MTLSize group = MTLSizeMake(std::min((int)width_bytes, 32),
+    MTLSize grid = MTLSizeMake(width_floats, height, 1);
+    MTLSize group = MTLSizeMake(std::min((int)width_floats, 32),
                                 std::min((int)height, 32), 1);
     [encoder dispatchThreads:grid threadsPerThreadgroup:group];
 }
@@ -186,10 +192,58 @@ struct Metal_Resource {
     Metal_Resource& operator=(const Metal_Resource&) = delete;
 };
 
+struct MetalCaptureScope {
+    MTLCaptureManager* manager = nil;
+    bool active = false;
+
+    MetalCaptureScope(id<MTLDevice> device, int n, bool final_) {
+        if (std::getenv("bm3d_METAL_CAPTURE") != nullptr) {
+            manager = [MTLCaptureManager sharedCaptureManager];
+            if ((manager != nullptr) && !manager.isCapturing) {
+                MTLCaptureDescriptor* desc =
+                    [[MTLCaptureDescriptor alloc] init];
+                desc.captureObject = device;
+                desc.destination = MTLCaptureDestinationGPUTraceDocument;
+
+                std::string filename =
+                    "bm3dmetal_capture_" + std::to_string(n) +
+                    std::to_string(static_cast<int>(final_)) + ".gputrace";
+                desc.outputURL = [NSURL
+                    fileURLWithPath:[NSString
+                                        stringWithUTF8String:filename.c_str()]];
+
+                NSError* error = nil;
+                if ([manager startCaptureWithDescriptor:desc error:&error]) {
+                    active = true;
+                    std::cout << "Started Metal Capture for frame " << n
+                              << "\n";
+                } else {
+                    std::cerr << "Failed to start Metal Capture: " <<
+                        [[error localizedDescription] UTF8String] << "\n";
+                    std::cerr << "Please run with environment variable "
+                              << "METAL_CAPTURE_ENABLED=1" << "\n";
+                }
+            }
+        }
+    }
+
+    ~MetalCaptureScope() {
+        if (active && (manager != nullptr)) {
+            [manager stopCapture];
+            std::cout << "Stopped Metal Capture" << "\n";
+        }
+    }
+
+    MetalCaptureScope(const MetalCaptureScope&) = delete;
+    MetalCaptureScope& operator=(const MetalCaptureScope&) = delete;
+    MetalCaptureScope(MetalCaptureScope&&) = delete;
+    MetalCaptureScope& operator=(MetalCaptureScope&&) = delete;
+};
+
 struct BM3DData {
-    VSNodeRef* node;
-    VSNodeRef* ref_node;
-    const VSVideoInfo* vi;
+    VSNode* node = nullptr;
+    VSNode* ref_node = nullptr;
+    const VSVideoInfo* vi = nullptr;
 
     std::array<float, 3> sigma;
     std::array<int, 3> block_step;
@@ -229,27 +283,13 @@ static inline void Aggregation(float* __restrict dstp, int dst_stride,
     }
 }
 
-static void VS_CC BM3DInit([[maybe_unused]] VSMap* in,
-                           [[maybe_unused]] VSMap* out, void** instanceData,
-                           VSNode* node, [[maybe_unused]] VSCore* core,
-                           const VSAPI* vsapi) noexcept {
-    auto* d = static_cast<BM3DData*>(*instanceData);
-    if (d->radius != 0) {
-        VSVideoInfo vi = *d->vi;
-        vi.height *= 2 * (2 * d->radius + 1);
-        vsapi->setVideoInfo(&vi, 1, node);
-    } else {
-        vsapi->setVideoInfo(d->vi, 1, node);
-    }
-}
-
-static const VSFrameRef* VS_CC BM3DGetFrame(int n, int activationReason,
-                                            void** instanceData,
-                                            [[maybe_unused]] void** frameData,
-                                            VSFrameContext* frameCtx,
-                                            VSCore* core,
-                                            const VSAPI* vsapi) noexcept {
-    auto* d = static_cast<BM3DData*>(*instanceData);
+static const VSFrame* VS_CC BM3DGetFrame(int n, int activationReason,
+                                         void* instanceData,
+                                         [[maybe_unused]] void** frameData,
+                                         VSFrameContext* frameCtx,
+                                         VSCore* core,
+                                         const VSAPI* vsapi) noexcept {
+    auto* d = static_cast<BM3DData*>(instanceData);
 
     if (activationReason == arInitial) {
         int start_frame = std::max(n - d->radius, 0);
@@ -263,14 +303,15 @@ static const VSFrameRef* VS_CC BM3DGetFrame(int n, int activationReason,
             }
         }
     } else if (activationReason == arAllFramesReady) {
+
         int radius = d->radius;
         int temporal_width = (2 * radius) + 1;
         bool final_ = d->final_;
         int num_input_frames = temporal_width * (final_ ? 2 : 1);
-
+        MetalCaptureScope capture_scope(d->device, n, final_);
         using freeFrame_t = decltype(vsapi->freeFrame);
         const auto srcs = [&]() {
-            std::vector<std::unique_ptr<const VSFrameRef, const freeFrame_t&>>
+            std::vector<std::unique_ptr<const VSFrame, const freeFrame_t&>>
                 temp;
             temp.reserve(num_input_frames);
             if (final_) {
@@ -292,16 +333,16 @@ static const VSFrameRef* VS_CC BM3DGetFrame(int n, int activationReason,
             return temp;
         }();
 
-        const VSFrameRef* src =
+        const VSFrame* src =
             srcs[radius + (final_ ? temporal_width : 0)].get();
-        std::unique_ptr<VSFrameRef, const freeFrame_t&> dst{nullptr,
-                                                            vsapi->freeFrame};
+        std::unique_ptr<VSFrame, const freeFrame_t&> dst{nullptr,
+                                                         vsapi->freeFrame};
 
         if (radius != 0) {
-            dst.reset(vsapi->newVideoFrame(d->vi->format, d->vi->width,
+            dst.reset(vsapi->newVideoFrame(&d->vi->format, d->vi->width,
                                            d->vi->height * 2 * temporal_width,
                                            src, core));
-            for (int i = 0; i < d->vi->format->numPlanes; ++i) {
+            for (int i = 0; i < d->vi->format.numPlanes; ++i) {
                 if (d->zero_init && !d->process.at(i)) {
                     memset(vsapi->getWritePtr(dst.get(), i), 0,
                            (size_t)vsapi->getFrameHeight(dst.get(), i) *
@@ -309,11 +350,11 @@ static const VSFrameRef* VS_CC BM3DGetFrame(int n, int activationReason,
                 }
             }
         } else {
-            std::array<const VSFrameRef*, 3> fr = {
+            std::array<const VSFrame*, 3> fr = {
                 d->process[0] ? nullptr : src, d->process[1] ? nullptr : src,
                 d->process[2] ? nullptr : src};
             std::array<int, 3> plane_indices = {0, 1, 2};
-            dst.reset(vsapi->newVideoFrame2(d->vi->format, d->vi->width,
+            dst.reset(vsapi->newVideoFrame2(&d->vi->format, d->vi->width,
                                             d->vi->height, fr.data(),
                                             plane_indices.data(), src, core));
         }
@@ -356,11 +397,15 @@ static const VSFrameRef* VS_CC BM3DGetFrame(int n, int activationReason,
                 return nullptr;
             }
 
-            memset(resource.d_res.contents, 0, res_buffer_size);
-
             if (d->chroma) {
                 id<MTLCommandBuffer> commandBuffer =
                     [resource.commandQueue commandBuffer];
+                id<MTLBlitCommandEncoder> blit =
+                    [commandBuffer blitCommandEncoder];
+                [blit fillBuffer:resource.d_res
+                           range:NSMakeRange(0, res_buffer_size)
+                           value:0];
+                [blit endEncoding];
                 id<MTLComputeCommandEncoder> encoder =
                     [commandBuffer computeCommandEncoder];
 
@@ -373,20 +418,21 @@ static const VSFrameRef* VS_CC BM3DGetFrame(int n, int activationReason,
                         int height = vsapi->getFrameHeight(src, i);
                         for (int j = 0; j < temporal_width; ++j) {
                             if (i == 0 || d->process.at(i)) {
-                                const VSFrameRef* frame =
+                                const VSFrame* frame =
                                     srcs[j + (outer * temporal_width)].get();
                                 int s_pitch = vsapi->getStride(frame, i);
-                                int width_bytes = static_cast<int>(
-                                    vsapi->getFrameWidth(frame, i) *
-                                    sizeof(float));
+                                int width =
+                                    vsapi->getFrameWidth(frame, i);
                                 const auto* p_read =
                                     vsapi->getReadPtr(frame, i);
 
                                 encode_copy_from_vs(encoder, d->device, p_read,
                                                     (size_t)height * s_pitch,
-                                                    s_pitch, resource.d_src,
-                                                    d_src_offset, d->d_pitch,
-                                                    width_bytes, height);
+                                                    s_pitch,
+                                                    resource.d_src, d_src_offset,
+                                                    d->d_pitch,
+                                                    static_cast<uint>(width),
+                                                    height);
                             }
                             d_src_offset += d->d_pitch * height;
                         }
@@ -431,51 +477,62 @@ static const VSFrameRef* VS_CC BM3DGetFrame(int n, int activationReason,
                         threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
 
                 [encoder endEncoding];
+
+                if (radius != 0) {
+                    id<MTLComputeCommandEncoder> outEnc =
+                        [commandBuffer computeCommandEncoder];
+                    [outEnc setComputePipelineState:resource.copy_pso];
+
+                    size_t h_dst_offset_bytes = 0;
+                    const size_t plane_slice_bytes =
+                        (size_t)d_stride * height * 2 * temporal_width *
+                        sizeof(float);
+                    for (int plane = 0; plane < 3; ++plane) {
+                        if (!d->process.at(plane)) {
+                            h_dst_offset_bytes += plane_slice_bytes;
+                            continue;
+                        }
+                        const int dst_pitch = vsapi->getStride(dst.get(), plane);
+                        const int out_height =
+                            vsapi->getFrameHeight(src, plane) * 2 *
+                            temporal_width;
+                        const int width =
+                            vsapi->getFrameWidth(src, plane);
+
+                        encode_copy_to_vs(
+                            outEnc, d->device, resource.d_res,
+                            h_dst_offset_bytes, d->d_pitch,
+                            vsapi->getWritePtr(dst.get(), plane),
+                            (size_t)out_height * dst_pitch, dst_pitch,
+                            static_cast<uint>(width), out_height);
+                        h_dst_offset_bytes += plane_slice_bytes;
+                    }
+                    [outEnc endEncoding];
+                }
+
                 [commandBuffer commit];
                 [commandBuffer waitUntilCompleted];
 
-                auto* h_dst = static_cast<float*>(resource.d_res.contents);
-                for (int plane = 0; plane < 3; ++plane) {
-                    if (!d->process.at(plane)) {
-                        h_dst += (size_t)d_stride * height * 2 * temporal_width;
-                        continue;
-                    }
-                    const int s_pitch = vsapi->getStride(src, plane);
-
-                    if (radius != 0) {
-                        int out_height = vsapi->getFrameHeight(src, plane) * 2 *
-                                         temporal_width;
-                        int width_bytes = static_cast<int>(
-                            vsapi->getFrameWidth(src, plane) * sizeof(float));
-
-                        id<MTLCommandBuffer> outCmdBuf =
-                            [resource.commandQueue commandBuffer];
-                        id<MTLComputeCommandEncoder> outEnc =
-                            [outCmdBuf computeCommandEncoder];
-                        [outEnc setComputePipelineState:resource.copy_pso];
-
-                        encode_copy_to_vs(outEnc, d->device, resource.d_res,
-                                          reinterpret_cast<uint8_t*>(h_dst) -
-                                              reinterpret_cast<uint8_t*>(
-                                                  resource.d_res.contents),
-                                          d->d_pitch,
-                                          vsapi->getWritePtr(dst.get(), plane),
-                                          (size_t)out_height * s_pitch, s_pitch,
-                                          width_bytes, out_height);
-
-                        [outEnc endEncoding];
-                        [outCmdBuf commit];
-                        [outCmdBuf waitUntilCompleted];
-                    } else {
+                if (radius == 0) {
+                    auto* h_dst = static_cast<float*>(resource.d_res.contents);
+                    for (int plane = 0; plane < 3; ++plane) {
+                        if (!d->process.at(plane)) {
+                            h_dst +=
+                                (size_t)d_stride * height * 2 * temporal_width;
+                            continue;
+                        }
+                        const int dst_pitch =
+                            vsapi->getStride(dst.get(), plane);
                         Aggregation(reinterpret_cast<float*>(
                                         vsapi->getWritePtr(dst.get(), plane)),
-                                    static_cast<int>(s_pitch / sizeof(float)),
+                                    static_cast<int>(dst_pitch / sizeof(float)),
                                     h_dst, d_stride, width, height);
+                        h_dst +=
+                            (size_t)d_stride * height * 2 * temporal_width;
                     }
-                    h_dst += (size_t)d_stride * height * 2 * temporal_width;
                 }
             } else {
-                for (int plane = 0; plane < d->vi->format->numPlanes; ++plane) {
+                for (int plane = 0; plane < d->vi->format.numPlanes; ++plane) {
                     if (!d->process.at(plane)) {
                         continue;
                     }
@@ -483,8 +540,8 @@ static const VSFrameRef* VS_CC BM3DGetFrame(int n, int activationReason,
                     int width = vsapi->getFrameWidth(src, plane);
                     int height = vsapi->getFrameHeight(src, plane);
                     int s_pitch = vsapi->getStride(src, plane);
+                    int dst_pitch = vsapi->getStride(dst.get(), plane);
                     int d_stride = static_cast<int>(d->d_pitch / sizeof(float));
-                    int width_bytes = static_cast<int>(width * sizeof(float));
 
                     size_t res_size =
                         (size_t)temporal_width * 2 * height * d->d_pitch;
@@ -501,10 +558,14 @@ static const VSFrameRef* VS_CC BM3DGetFrame(int n, int activationReason,
                         return nullptr;
                     }
 
-                    memset(resource.d_res.contents, 0, res_size);
-
                     id<MTLCommandBuffer> commandBuffer =
                         [resource.commandQueue commandBuffer];
+                    id<MTLBlitCommandEncoder> blit =
+                        [commandBuffer blitCommandEncoder];
+                    [blit fillBuffer:resource.d_res
+                               range:NSMakeRange(0, res_size)
+                               value:0];
+                    [blit endEncoding];
                     id<MTLComputeCommandEncoder> encoder =
                         [commandBuffer computeCommandEncoder];
 
@@ -512,11 +573,12 @@ static const VSFrameRef* VS_CC BM3DGetFrame(int n, int activationReason,
 
                     size_t d_src_offset = 0;
                     for (int i = 0; i < num_input_frames; ++i) {
-                        const VSFrameRef* frame = srcs[i].get();
+                        const VSFrame* frame = srcs[i].get();
                         encode_copy_from_vs(
                             encoder, d->device, vsapi->getReadPtr(frame, plane),
                             (size_t)height * s_pitch, s_pitch, resource.d_src,
-                            d_src_offset, d->d_pitch, width_bytes, height);
+                            d_src_offset, d->d_pitch, static_cast<uint>(width),
+                            height);
                         d_src_offset += d->d_pitch * height;
                     }
 
@@ -557,41 +619,37 @@ static const VSFrameRef* VS_CC BM3DGetFrame(int n, int activationReason,
                             threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
 
                     [encoder endEncoding];
+
+                    if (radius != 0) {
+                        id<MTLComputeCommandEncoder> outEnc =
+                            [commandBuffer computeCommandEncoder];
+                        [outEnc setComputePipelineState:resource.copy_pso];
+
+                        int out_height = vsapi->getFrameHeight(src, plane) * 2 *
+                                         temporal_width;
+                        int out_width = vsapi->getFrameWidth(src, plane);
+
+                        encode_copy_to_vs(outEnc, d->device, resource.d_res, 0,
+                                          d->d_pitch,
+                                          vsapi->getWritePtr(dst.get(), plane),
+                                          (size_t)out_height * dst_pitch,
+                                          dst_pitch,
+                                          static_cast<uint>(out_width),
+                                          out_height);
+                        [outEnc endEncoding];
+                    }
+
                     [commandBuffer commit];
                     [commandBuffer waitUntilCompleted];
 
-                    auto* h_dst = static_cast<float*>(resource.d_res.contents);
-                    auto* dstp = reinterpret_cast<float*>(
-                        vsapi->getWritePtr(dst.get(), plane));
-                    if (radius != 0) {
-                        int s_pitch = vsapi->getStride(src, plane);
-                        int out_height = vsapi->getFrameHeight(src, plane) * 2 *
-                                         temporal_width;
-                        int width_bytes = static_cast<int>(
-                            vsapi->getFrameWidth(src, plane) * sizeof(float));
-
-                        id<MTLCommandBuffer> outCmdBuf =
-                            [resource.commandQueue commandBuffer];
-                        id<MTLComputeCommandEncoder> outEnc =
-                            [outCmdBuf computeCommandEncoder];
-                        [outEnc setComputePipelineState:resource.copy_pso];
-
-                        encode_copy_to_vs(outEnc, d->device, resource.d_res,
-                                          reinterpret_cast<uint8_t*>(h_dst) -
-                                              reinterpret_cast<uint8_t*>(
-                                                  resource.d_res.contents),
-                                          d->d_pitch,
-                                          vsapi->getWritePtr(dst.get(), plane),
-                                          (size_t)out_height * s_pitch, s_pitch,
-                                          width_bytes, out_height);
-
-                        [outEnc endEncoding];
-                        [outCmdBuf commit];
-                        [outCmdBuf waitUntilCompleted];
-                    } else {
-                        Aggregation(dstp,
-                                    static_cast<int>(s_pitch / sizeof(float)),
-                                    h_dst, d_stride, width, height);
+                    if (radius == 0) {
+                        auto* h_dst =
+                            static_cast<float*>(resource.d_res.contents);
+                        auto* dstp = reinterpret_cast<float*>(
+                            vsapi->getWritePtr(dst.get(), plane));
+                        Aggregation(
+                            dstp, static_cast<int>(dst_pitch / sizeof(float)),
+                            h_dst, d_stride, width, height);
                     }
                 }
             }
@@ -603,14 +661,14 @@ static const VSFrameRef* VS_CC BM3DGetFrame(int n, int activationReason,
         d->semaphore.release();
 
         if (radius != 0) {
-            VSMap* dst_prop = vsapi->getFramePropsRW(dst.get());
-            vsapi->propSetInt(dst_prop, "BM3D_V_radius", d->radius, paReplace);
+            VSMap* dst_prop = vsapi->getFramePropertiesRW(dst.get());
+            vsapi->mapSetInt(dst_prop, "BM3D_V_radius", d->radius, maReplace);
             std::array<int64_t, 3> process = {
                 static_cast<int64_t>(d->process[0]),
                 static_cast<int64_t>(d->process[1]),
                 static_cast<int64_t>(d->process[2])};
-            vsapi->propSetIntArray(dst_prop, "BM3D_V_process", process.data(),
-                                   3);
+            vsapi->mapSetIntArray(dst_prop, "BM3D_V_process", process.data(),
+                                  3);
         }
 
         return dst.release();
@@ -641,7 +699,7 @@ static void VS_CC BM3DCreate(const VSMap* in, VSMap* out,
     int err = 0;
 
     auto set_error = [&](const std::string& errorMessage) {
-        vsapi->setError(out, ("BM3DMetal: " + errorMessage).c_str());
+        vsapi->mapSetError(out, ("BM3DMetal: " + errorMessage).c_str());
         d->resources.clear();
         d->device = nil;
         if (d->node) {
@@ -652,20 +710,21 @@ static void VS_CC BM3DCreate(const VSMap* in, VSMap* out,
         }
     };
 
-    d->node = vsapi->propGetNode(in, "clip", 0, nullptr);
+    d->node = vsapi->mapGetNode(in, "clip", 0, nullptr);
     d->vi = vsapi->getVideoInfo(d->node);
 
-    if (d->vi->format->sampleType != stFloat ||
-        d->vi->format->bitsPerSample != 32 || (isConstantFormat(d->vi) == 0)) {
+    if (d->vi->format.sampleType != stFloat ||
+        d->vi->format.bitsPerSample != 32 ||
+        !vsh::isConstantVideoFormat(d->vi)) {
         set_error("only constant format 32bit float input supported");
         return;
     }
 
-    d->ref_node = vsapi->propGetNode(in, "ref", 0, &err);
+    d->ref_node = vsapi->mapGetNode(in, "ref", 0, &err);
     d->final_ = (err == 0);
     if (d->final_) {
         const VSVideoInfo* ref_vi = vsapi->getVideoInfo(d->ref_node);
-        if (ref_vi->format->id != d->vi->format->id ||
+        if (!vsh::isSameVideoFormat(&ref_vi->format, &d->vi->format) ||
             ref_vi->width != d->vi->width || ref_vi->height != d->vi->height ||
             ref_vi->numFrames != d->vi->numFrames) {
             set_error("ref clip properties must match input clip");
@@ -675,7 +734,7 @@ static void VS_CC BM3DCreate(const VSMap* in, VSMap* out,
 
     for (int i = 0; i < 3; ++i) {
         d->sigma.at(i) =
-            static_cast<float>(vsapi->propGetFloat(in, "sigma", i, &err));
+            static_cast<float>(vsapi->mapGetFloat(in, "sigma", i, &err));
         if (err != 0) {
             d->sigma.at(i) = (i == 0) ? 3.0F : d->sigma.at(i - 1);
         }
@@ -691,7 +750,7 @@ static void VS_CC BM3DCreate(const VSMap* in, VSMap* out,
 
     for (int i = 0; i < 3; ++i) {
         d->block_step.at(i) =
-            static_cast<int>(vsapi->propGetInt(in, "block_step", i, &err));
+            static_cast<int>(vsapi->mapGetInt(in, "block_step", i, &err));
         if (err != 0) {
             d->block_step.at(i) = (i == 0) ? 8 : d->block_step.at(i - 1);
         }
@@ -703,7 +762,7 @@ static void VS_CC BM3DCreate(const VSMap* in, VSMap* out,
 
     for (int i = 0; i < 3; ++i) {
         d->bm_range.at(i) =
-            static_cast<int>(vsapi->propGetInt(in, "bm_range", i, &err));
+            static_cast<int>(vsapi->mapGetInt(in, "bm_range", i, &err));
         if (err != 0) {
             d->bm_range.at(i) = (i == 0) ? 9 : d->bm_range.at(i - 1);
         }
@@ -713,7 +772,7 @@ static void VS_CC BM3DCreate(const VSMap* in, VSMap* out,
         }
     }
 
-    d->radius = static_cast<int>(vsapi->propGetInt(in, "radius", 0, &err));
+    d->radius = static_cast<int>(vsapi->mapGetInt(in, "radius", 0, &err));
     if (err != 0) {
         d->radius = 0;
     }
@@ -724,7 +783,7 @@ static void VS_CC BM3DCreate(const VSMap* in, VSMap* out,
 
     for (int i = 0; i < 3; ++i) {
         d->ps_num.at(i) =
-            static_cast<int>(vsapi->propGetInt(in, "ps_num", i, &err));
+            static_cast<int>(vsapi->mapGetInt(in, "ps_num", i, &err));
         if (err != 0) {
             d->ps_num.at(i) = (i == 0) ? 2 : d->ps_num.at(i - 1);
         }
@@ -736,7 +795,7 @@ static void VS_CC BM3DCreate(const VSMap* in, VSMap* out,
 
     for (int i = 0; i < 3; ++i) {
         d->ps_range.at(i) =
-            static_cast<int>(vsapi->propGetInt(in, "ps_range", i, &err));
+            static_cast<int>(vsapi->mapGetInt(in, "ps_range", i, &err));
         if (err != 0) {
             d->ps_range.at(i) = (i == 0) ? 4 : d->ps_range.at(i - 1);
         }
@@ -746,20 +805,22 @@ static void VS_CC BM3DCreate(const VSMap* in, VSMap* out,
         }
     }
 
-    d->chroma = (vsapi->propGetInt(in, "chroma", 0, &err) != 0);
-    if (d->chroma && d->vi->format->id != pfYUV444PS) {
+    d->chroma = (vsapi->mapGetInt(in, "chroma", 0, &err) != 0);
+    if (d->chroma &&
+        !vsh::isSameVideoPresetFormat(pfYUV444PS, &d->vi->format, core,
+                                      vsapi)) {
         set_error("chroma=true requires YUV444PS");
         return;
     }
 
     int device_id =
-        static_cast<int>(vsapi->propGetInt(in, "device_id", 0, &err));
+        static_cast<int>(vsapi->mapGetInt(in, "device_id", 0, &err));
     if (err != 0) {
         device_id = 0;
     }
 
     int extractor_exp =
-        static_cast<int>(vsapi->propGetInt(in, "extractor_exp", 0, &err));
+        static_cast<int>(vsapi->mapGetInt(in, "extractor_exp", 0, &err));
     if (err == 0) {
         d->extractor =
             (extractor_exp != 0) ? std::ldexp(1.0F, extractor_exp) : 0.0F;
@@ -767,11 +828,12 @@ static void VS_CC BM3DCreate(const VSMap* in, VSMap* out,
         d->extractor = 0.0F;
     }
 
-    d->zero_init = (vsapi->propGetInt(in, "zero_init", 0, &err) != 0);
+    d->zero_init = (vsapi->mapGetInt(in, "zero_init", 0, &err) != 0);
     if (err != 0) {
         d->zero_init = true;
     }
 
+    std::string error_message;
     @autoreleasepool {
         NSArray<id<MTLDevice>>* devices = MTLCopyAllDevices();
         if (device_id >= static_cast<int>(devices.count)) {
@@ -800,7 +862,7 @@ static void VS_CC BM3DCreate(const VSMap* in, VSMap* out,
             return;
         }
 
-        bool fast = (vsapi->propGetInt(in, "fast", 0, &err) != 0);
+        bool fast = (vsapi->mapGetInt(in, "fast", 0, &err) != 0);
         if (err != 0) {
             fast = false;
         }
@@ -811,10 +873,10 @@ static void VS_CC BM3DCreate(const VSMap* in, VSMap* out,
 
         int max_width = d->process[0]
                             ? d->vi->width
-                            : d->vi->width >> d->vi->format->subSamplingW;
+                            : d->vi->width >> d->vi->format.subSamplingW;
         int max_height = d->process[0]
                              ? d->vi->height
-                             : d->vi->height >> d->vi->format->subSamplingH;
+                             : d->vi->height >> d->vi->format.subSamplingH;
         int num_planes = d->chroma ? 3 : 1;
         int temporal_width = (2 * d->radius) + 1;
 
@@ -824,8 +886,6 @@ static void VS_CC BM3DCreate(const VSMap* in, VSMap* out,
         size_t src_buffer_height =
             (d->final_ ? 2 : 1) * num_planes * temporal_width * max_height;
         size_t res_buffer_height = num_planes * temporal_width * 2 * max_height;
-
-        std::string error_message;
 
         for (int i = 0; i < d->num_copy_engines; ++i) {
             Metal_Resource res;
@@ -910,34 +970,39 @@ static void VS_CC BM3DCreate(const VSMap* in, VSMap* out,
         }
     }
 
-    vsapi->createFilter(in, out, "BM3D", BM3DInit, BM3DGetFrame, BM3DFree,
-                        fmParallel, 0, d.release(), core);
+    if (!error_message.empty()) {
+        set_error(error_message);
+        return;
+    }
+
+    VSVideoInfo out_vi = *d->vi;
+    if (d->radius != 0) {
+        out_vi.height *= 2 * (2 * d->radius + 1);
+    }
+    std::array<VSFilterDependency, 2> deps = {{
+        {d->node, rpGeneral},
+        {d->ref_node, rpGeneral},
+    }};
+    vsapi->createVideoFilter(out, "BM3D", &out_vi, BM3DGetFrame, BM3DFree,
+                             fmParallel, deps.data(), d->final_ ? 2 : 1,
+                             d.release(), core);
 }
 
 struct VAggregateData {
-    VSNodeRef* node;
-    VSNodeRef* src_node;
-    const VSVideoInfo* src_vi;
+    VSNode* node = nullptr;
+    VSNode* src_node = nullptr;
+    const VSVideoInfo* src_vi = nullptr;
     std::array<bool, 3> process;
     int radius;
     std::unordered_map<std::thread::id, std::vector<float>> buffer;
     std::shared_mutex buffer_lock;
 };
 
-static void VS_CC VAggregateInit([[maybe_unused]] VSMap* in,
-                                 [[maybe_unused]] VSMap* out,
-                                 void** instanceData, VSNode* node,
-                                 [[maybe_unused]] VSCore* core,
-                                 const VSAPI* vsapi) {
-    auto* d = static_cast<VAggregateData*>(*instanceData);
-    vsapi->setVideoInfo(d->src_vi, 1, node);
-}
-
-static const VSFrameRef* VS_CC
-VAggregateGetFrame(int n, int activationReason, void** instanceData,
+static const VSFrame* VS_CC
+VAggregateGetFrame(int n, int activationReason, void* instanceData,
                    [[maybe_unused]] void** frameData, VSFrameContext* frameCtx,
                    VSCore* core, const VSAPI* vsapi) {
-    auto* d = static_cast<VAggregateData*>(*instanceData);
+    auto* d = static_cast<VAggregateData*>(instanceData);
 
     if (activationReason == arInitial) {
         int start_frame = std::max(n - d->radius, 0);
@@ -947,9 +1012,9 @@ VAggregateGetFrame(int n, int activationReason, void** instanceData,
         }
         vsapi->requestFrameFilter(n, d->src_node, frameCtx);
     } else if (activationReason == arAllFramesReady) {
-        const VSFrameRef* src_frame =
+        const VSFrame* src_frame =
             vsapi->getFrameFilter(n, d->src_node, frameCtx);
-        std::vector<const VSFrameRef*> vbm3d_frames;
+        std::vector<const VSFrame*> vbm3d_frames;
         vbm3d_frames.reserve((2 * d->radius) + 1);
         for (int i = n - d->radius; i <= n + d->radius; ++i) {
             vbm3d_frames.emplace_back(vsapi->getFrameFilter(
@@ -979,16 +1044,16 @@ VAggregateGetFrame(int n, int activationReason, void** instanceData,
             }
         }
 
-        std::array<const VSFrameRef*, 3> fr = {
+        std::array<const VSFrame*, 3> fr = {
             d->process[0] ? nullptr : src_frame,
             d->process[1] ? nullptr : src_frame,
             d->process[2] ? nullptr : src_frame};
         std::array<int, 3> plane_indices = {0, 1, 2};
         auto* dst_frame = vsapi->newVideoFrame2(
-            d->src_vi->format, d->src_vi->width, d->src_vi->height, fr.data(),
-            plane_indices.data(), src_frame, core);
+            &d->src_vi->format, d->src_vi->width, d->src_vi->height,
+            fr.data(), plane_indices.data(), src_frame, core);
 
-        for (int plane = 0; plane < d->src_vi->format->numPlanes; ++plane) {
+        for (int plane = 0; plane < d->src_vi->format.numPlanes; ++plane) {
             if (d->process.at(plane)) {
                 int plane_width = vsapi->getFrameWidth(src_frame, plane);
                 int plane_height = vsapi->getFrameHeight(src_frame, plane);
@@ -1077,25 +1142,29 @@ static void VS_CC VAggregateCreate(const VSMap* in, VSMap* out,
                                    [[maybe_unused]] void* userData,
                                    VSCore* core, const VSAPI* vsapi) {
     auto d = std::make_unique<VAggregateData>();
-    d->node = vsapi->propGetNode(in, "clip", 0, nullptr);
+    d->node = vsapi->mapGetNode(in, "clip", 0, nullptr);
     const auto* vi = vsapi->getVideoInfo(d->node);
-    d->src_node = vsapi->propGetNode(in, "src", 0, nullptr);
+    d->src_node = vsapi->mapGetNode(in, "src", 0, nullptr);
     d->src_vi = vsapi->getVideoInfo(d->src_node);
     d->radius = (vi->height / d->src_vi->height - 2) / 4;
     d->process.fill(false);
-    for (int i = 0; i < vsapi->propNumElements(in, "planes"); ++i) {
+    for (int i = 0; i < vsapi->mapNumElements(in, "planes"); ++i) {
         int plane =
-            static_cast<int>(vsapi->propGetInt(in, "planes", i, nullptr));
+            static_cast<int>(vsapi->mapGetInt(in, "planes", i, nullptr));
         if (plane >= 0 && plane < static_cast<int>(d->process.size())) {
             d->process.at(plane) = true;
         }
     }
     VSCoreInfo core_info;
-    vsapi->getCoreInfo2(core, &core_info);
+    vsapi->getCoreInfo(core, &core_info);
     d->buffer.reserve(core_info.numThreads);
-    vsapi->createFilter(in, out, "VAggregate", VAggregateInit,
-                        VAggregateGetFrame, VAggregateFree, fmParallel, 0,
-                        d.release(), core);
+    std::array<VSFilterDependency, 2> deps = {{
+        {d->node, rpGeneral},
+        {d->src_node, rpStrictSpatial},
+    }};
+    vsapi->createVideoFilter(out, "VAggregate", d->src_vi, VAggregateGetFrame,
+                             VAggregateFree, fmParallel, deps.data(),
+                             static_cast<int>(deps.size()), d.release(), core);
 }
 
 static void VS_CC BM3Dv2Create(const VSMap* in, VSMap* out,
@@ -1104,9 +1173,9 @@ static void VS_CC BM3Dv2Create(const VSMap* in, VSMap* out,
                                const VSAPI* vsapi) {
     std::array<bool, 3> process;
     process.fill(true);
-    int num_sigma_args = vsapi->propNumElements(in, "sigma");
+    int num_sigma_args = vsapi->mapNumElements(in, "sigma");
     for (int i = 0; i < std::min(3, num_sigma_args); ++i) {
-        if (vsapi->propGetFloat(in, "sigma", i, nullptr) <
+        if (vsapi->mapGetFloat(in, "sigma", i, nullptr) <
             std::numeric_limits<float>::epsilon()) {
             process.at(i) = false;
         }
@@ -1118,77 +1187,80 @@ static void VS_CC BM3Dv2Create(const VSMap* in, VSMap* out,
     }
 
     bool skip = true;
-    auto* src = vsapi->propGetNode(in, "clip", 0, nullptr);
+    auto* src = vsapi->mapGetNode(in, "clip", 0, nullptr);
     const auto* src_vi = vsapi->getVideoInfo(src);
-    for (int i = 0; i < src_vi->format->numPlanes; ++i) {
+    for (int i = 0; i < src_vi->format.numPlanes; ++i) {
         skip &= !process.at(i);
     }
     if (skip) {
-        vsapi->propSetNode(out, "clip", src, paReplace);
+        vsapi->mapSetNode(out, "clip", src, maReplace);
         vsapi->freeNode(src);
         return;
     }
 
     auto* map = vsapi->invoke(myself, "BM3D", in);
-    if (vsapi->getError(map) != nullptr) {
-        vsapi->setError(out, vsapi->getError(map));
+    if (vsapi->mapGetError(map) != nullptr) {
+        vsapi->mapSetError(out, vsapi->mapGetError(map));
         vsapi->freeMap(map);
         vsapi->freeNode(src);
         return;
     }
 
     int err = 0;
-    int radius = static_cast<int>(vsapi->propGetInt(in, "radius", 0, &err));
+    int radius = static_cast<int>(vsapi->mapGetInt(in, "radius", 0, &err));
     if (err != 0) {
         radius = 0;
     }
     if (radius == 0) {
-        auto* node = vsapi->propGetNode(map, "clip", 0, nullptr);
+        auto* node = vsapi->mapGetNode(map, "clip", 0, nullptr);
         vsapi->freeMap(map);
-        vsapi->propSetNode(out, "clip", node, paReplace);
+        vsapi->mapSetNode(out, "clip", node, maReplace);
         vsapi->freeNode(node);
         vsapi->freeNode(src);
         return;
     }
 
-    vsapi->propSetNode(map, "src", src, paReplace);
+    vsapi->mapSetNode(map, "src", src, maReplace);
     vsapi->freeNode(src);
     for (int i = 0; i < 3; ++i) {
         if (process.at(i)) {
-            vsapi->propSetInt(map, "planes", i, paAppend);
+            vsapi->mapSetInt(map, "planes", i, maAppend);
         }
     }
 
     auto* map2 = vsapi->invoke(myself, "VAggregate", map);
     vsapi->freeMap(map);
-    if (vsapi->getError(map2) != nullptr) {
-        vsapi->setError(out, vsapi->getError(map2));
+    if (vsapi->mapGetError(map2) != nullptr) {
+        vsapi->mapSetError(out, vsapi->mapGetError(map2));
         vsapi->freeMap(map2);
         return;
     }
 
-    auto* node = vsapi->propGetNode(map2, "clip", 0, nullptr);
+    auto* node = vsapi->mapGetNode(map2, "clip", 0, nullptr);
     vsapi->freeMap(map2);
-    vsapi->propSetNode(out, "clip", node, paReplace);
+    vsapi->mapSetNode(out, "clip", node, maReplace);
     vsapi->freeNode(node);
 }
 
 VS_EXTERNAL_API(void)
-VapourSynthPluginInit(VSConfigPlugin configFunc,
-                      VSRegisterFunction registerFunc, VSPlugin* plugin) {
+VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI* vspapi) {
     myself = plugin;
-    configFunc("com.Sunflower-Dolls.bm3dmetal", "bm3dmetal",
-               "BM3D algorithm implemented in Metal", VAPOURSYNTH_API_VERSION,
-               1, plugin);
-    const char* bm3d_args = "clip:clip;ref:clip:opt;sigma:float[]:opt;block_"
+    vspapi->configPlugin("com.Sunflower-Dolls.bm3dmetal", "bm3dmetal",
+                         "BM3D algorithm implemented in Metal",
+                         VS_MAKE_VERSION(1, 0), VAPOURSYNTH_API_VERSION, 0,
+                         plugin);
+    const char* bm3d_args = "clip:vnode;ref:vnode:opt;sigma:float[]:opt;block_"
                             "step:int[]:opt;bm_range:"
                             "int[]:opt;radius:int:opt;ps_num:int[]:opt;ps_"
                             "range:int[]:opt;chroma:int:"
                             "opt;device_id:int:opt;fast:int:opt;extractor_exp:"
                             "int:opt;zero_init:int:"
                             "opt;";
-    registerFunc("BM3D", bm3d_args, BM3DCreate, nullptr, plugin);
-    registerFunc("VAggregate", "clip:clip;src:clip;planes:int[];",
-                 VAggregateCreate, nullptr, plugin);
-    registerFunc("BM3Dv2", bm3d_args, BM3Dv2Create, nullptr, plugin);
+    vspapi->registerFunction("BM3D", bm3d_args, "clip:vnode;", BM3DCreate,
+                             nullptr, plugin);
+    vspapi->registerFunction("VAggregate",
+                             "clip:vnode;src:vnode;planes:int[];",
+                             "clip:vnode;", VAggregateCreate, nullptr, plugin);
+    vspapi->registerFunction("BM3Dv2", bm3d_args, "clip:vnode;", BM3Dv2Create,
+                             nullptr, plugin);
 }

@@ -7,3 +7,4 @@ build/*
 builddir/*
 cuda-impl/*
 benchmark.py
+*.gputrace

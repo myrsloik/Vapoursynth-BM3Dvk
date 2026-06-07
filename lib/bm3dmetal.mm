@@ -45,13 +45,11 @@
 
 using namespace std::string_literals;
 
-static inline void encode_copy_from_vs(id<MTLComputeCommandEncoder> encoder,
-                                       id<MTLDevice> device,
-                                       const void* src_ptr, size_t src_len,
-                                       uint src_stride_bytes,
-                                       id<MTLBuffer> dst_buf, size_t dst_offset,
-                                       uint dst_stride_bytes, uint width_floats,
-                                       uint height) {
+static inline void
+encode_copy_from_vs(id<MTLComputeCommandEncoder> encoder, id<MTLDevice> device,
+                    const void* src_ptr, size_t src_len, uint src_stride_bytes,
+                    id<MTLBuffer> dst_buf, size_t dst_offset,
+                    uint dst_stride_bytes, uint width_floats, uint height) {
     id<MTLBuffer> src_buf =
         // NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast)
         [device newBufferWithBytesNoCopy:const_cast<void*>(src_ptr)
@@ -286,8 +284,7 @@ static inline void Aggregation(float* __restrict dstp, int dst_stride,
 static const VSFrame* VS_CC BM3DGetFrame(int n, int activationReason,
                                          void* instanceData,
                                          [[maybe_unused]] void** frameData,
-                                         VSFrameContext* frameCtx,
-                                         VSCore* core,
+                                         VSFrameContext* frameCtx, VSCore* core,
                                          const VSAPI* vsapi) noexcept {
     auto* d = static_cast<BM3DData*>(instanceData);
 
@@ -333,8 +330,7 @@ static const VSFrame* VS_CC BM3DGetFrame(int n, int activationReason,
             return temp;
         }();
 
-        const VSFrame* src =
-            srcs[radius + (final_ ? temporal_width : 0)].get();
+        const VSFrame* src = srcs[radius + (final_ ? temporal_width : 0)].get();
         std::unique_ptr<VSFrame, const freeFrame_t&> dst{nullptr,
                                                          vsapi->freeFrame};
 
@@ -350,9 +346,9 @@ static const VSFrame* VS_CC BM3DGetFrame(int n, int activationReason,
                 }
             }
         } else {
-            std::array<const VSFrame*, 3> fr = {
-                d->process[0] ? nullptr : src, d->process[1] ? nullptr : src,
-                d->process[2] ? nullptr : src};
+            std::array<const VSFrame*, 3> fr = {d->process[0] ? nullptr : src,
+                                                d->process[1] ? nullptr : src,
+                                                d->process[2] ? nullptr : src};
             std::array<int, 3> plane_indices = {0, 1, 2};
             dst.reset(vsapi->newVideoFrame2(&d->vi->format, d->vi->width,
                                             d->vi->height, fr.data(),
@@ -421,18 +417,15 @@ static const VSFrame* VS_CC BM3DGetFrame(int n, int activationReason,
                                 const VSFrame* frame =
                                     srcs[j + (outer * temporal_width)].get();
                                 int s_pitch = vsapi->getStride(frame, i);
-                                int width =
-                                    vsapi->getFrameWidth(frame, i);
+                                int width = vsapi->getFrameWidth(frame, i);
                                 const auto* p_read =
                                     vsapi->getReadPtr(frame, i);
 
-                                encode_copy_from_vs(encoder, d->device, p_read,
-                                                    (size_t)height * s_pitch,
-                                                    s_pitch,
-                                                    resource.d_src, d_src_offset,
-                                                    d->d_pitch,
-                                                    static_cast<uint>(width),
-                                                    height);
+                                encode_copy_from_vs(
+                                    encoder, d->device, p_read,
+                                    (size_t)height * s_pitch, s_pitch,
+                                    resource.d_src, d_src_offset, d->d_pitch,
+                                    static_cast<uint>(width), height);
                             }
                             d_src_offset += d->d_pitch * height;
                         }
@@ -484,27 +477,27 @@ static const VSFrame* VS_CC BM3DGetFrame(int n, int activationReason,
                     [outEnc setComputePipelineState:resource.copy_pso];
 
                     size_t h_dst_offset_bytes = 0;
-                    const size_t plane_slice_bytes =
-                        (size_t)d_stride * height * 2 * temporal_width *
-                        sizeof(float);
+                    const size_t plane_slice_bytes = (size_t)d_stride * height *
+                                                     2 * temporal_width *
+                                                     sizeof(float);
                     for (int plane = 0; plane < 3; ++plane) {
                         if (!d->process.at(plane)) {
                             h_dst_offset_bytes += plane_slice_bytes;
                             continue;
                         }
-                        const int dst_pitch = vsapi->getStride(dst.get(), plane);
+                        const int dst_pitch =
+                            vsapi->getStride(dst.get(), plane);
                         const int out_height =
                             vsapi->getFrameHeight(src, plane) * 2 *
                             temporal_width;
-                        const int width =
-                            vsapi->getFrameWidth(src, plane);
+                        const int width = vsapi->getFrameWidth(src, plane);
 
-                        encode_copy_to_vs(
-                            outEnc, d->device, resource.d_res,
-                            h_dst_offset_bytes, d->d_pitch,
-                            vsapi->getWritePtr(dst.get(), plane),
-                            (size_t)out_height * dst_pitch, dst_pitch,
-                            static_cast<uint>(width), out_height);
+                        encode_copy_to_vs(outEnc, d->device, resource.d_res,
+                                          h_dst_offset_bytes, d->d_pitch,
+                                          vsapi->getWritePtr(dst.get(), plane),
+                                          (size_t)out_height * dst_pitch,
+                                          dst_pitch, static_cast<uint>(width),
+                                          out_height);
                         h_dst_offset_bytes += plane_slice_bytes;
                     }
                     [outEnc endEncoding];
@@ -527,8 +520,7 @@ static const VSFrame* VS_CC BM3DGetFrame(int n, int activationReason,
                                         vsapi->getWritePtr(dst.get(), plane)),
                                     static_cast<int>(dst_pitch / sizeof(float)),
                                     h_dst, d_stride, width, height);
-                        h_dst +=
-                            (size_t)d_stride * height * 2 * temporal_width;
+                        h_dst += (size_t)d_stride * height * 2 * temporal_width;
                     }
                 }
             } else {
@@ -629,13 +621,11 @@ static const VSFrame* VS_CC BM3DGetFrame(int n, int activationReason,
                                          temporal_width;
                         int out_width = vsapi->getFrameWidth(src, plane);
 
-                        encode_copy_to_vs(outEnc, d->device, resource.d_res, 0,
-                                          d->d_pitch,
-                                          vsapi->getWritePtr(dst.get(), plane),
-                                          (size_t)out_height * dst_pitch,
-                                          dst_pitch,
-                                          static_cast<uint>(out_width),
-                                          out_height);
+                        encode_copy_to_vs(
+                            outEnc, d->device, resource.d_res, 0, d->d_pitch,
+                            vsapi->getWritePtr(dst.get(), plane),
+                            (size_t)out_height * dst_pitch, dst_pitch,
+                            static_cast<uint>(out_width), out_height);
                         [outEnc endEncoding];
                     }
 
@@ -647,9 +637,9 @@ static const VSFrame* VS_CC BM3DGetFrame(int n, int activationReason,
                             static_cast<float*>(resource.d_res.contents);
                         auto* dstp = reinterpret_cast<float*>(
                             vsapi->getWritePtr(dst.get(), plane));
-                        Aggregation(
-                            dstp, static_cast<int>(dst_pitch / sizeof(float)),
-                            h_dst, d_stride, width, height);
+                        Aggregation(dstp,
+                                    static_cast<int>(dst_pitch / sizeof(float)),
+                                    h_dst, d_stride, width, height);
                     }
                 }
             }
@@ -806,9 +796,8 @@ static void VS_CC BM3DCreate(const VSMap* in, VSMap* out,
     }
 
     d->chroma = (vsapi->mapGetInt(in, "chroma", 0, &err) != 0);
-    if (d->chroma &&
-        !vsh::isSameVideoPresetFormat(pfYUV444PS, &d->vi->format, core,
-                                      vsapi)) {
+    if (d->chroma && !vsh::isSameVideoPresetFormat(pfYUV444PS, &d->vi->format,
+                                                   core, vsapi)) {
         set_error("chroma=true requires YUV444PS");
         return;
     }
@@ -1044,14 +1033,14 @@ VAggregateGetFrame(int n, int activationReason, void* instanceData,
             }
         }
 
-        std::array<const VSFrame*, 3> fr = {
-            d->process[0] ? nullptr : src_frame,
-            d->process[1] ? nullptr : src_frame,
-            d->process[2] ? nullptr : src_frame};
+        std::array<const VSFrame*, 3> fr = {d->process[0] ? nullptr : src_frame,
+                                            d->process[1] ? nullptr : src_frame,
+                                            d->process[2] ? nullptr
+                                                          : src_frame};
         std::array<int, 3> plane_indices = {0, 1, 2};
         auto* dst_frame = vsapi->newVideoFrame2(
-            &d->src_vi->format, d->src_vi->width, d->src_vi->height,
-            fr.data(), plane_indices.data(), src_frame, core);
+            &d->src_vi->format, d->src_vi->width, d->src_vi->height, fr.data(),
+            plane_indices.data(), src_frame, core);
 
         for (int plane = 0; plane < d->src_vi->format.numPlanes; ++plane) {
             if (d->process.at(plane)) {
@@ -1247,7 +1236,7 @@ VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI* vspapi) {
     myself = plugin;
     vspapi->configPlugin("com.Sunflower-Dolls.bm3dmetal", "bm3dmetal",
                          "BM3D algorithm implemented in Metal",
-                         VS_MAKE_VERSION(1, 0), VAPOURSYNTH_API_VERSION, 0,
+                         VS_MAKE_VERSION(4, 0), VAPOURSYNTH_API_VERSION, 0,
                          plugin);
     const char* bm3d_args = "clip:vnode;ref:vnode:opt;sigma:float[]:opt;block_"
                             "step:int[]:opt;bm_range:"
@@ -1258,8 +1247,7 @@ VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI* vspapi) {
                             "opt;";
     vspapi->registerFunction("BM3D", bm3d_args, "clip:vnode;", BM3DCreate,
                              nullptr, plugin);
-    vspapi->registerFunction("VAggregate",
-                             "clip:vnode;src:vnode;planes:int[];",
+    vspapi->registerFunction("VAggregate", "clip:vnode;src:vnode;planes:int[];",
                              "clip:vnode;", VAggregateCreate, nullptr, plugin);
     vspapi->registerFunction("BM3Dv2", bm3d_args, "clip:vnode;", BM3Dv2Create,
                              nullptr, plugin);

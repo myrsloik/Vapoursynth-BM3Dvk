@@ -16,13 +16,25 @@ Ported from [VapourSynth-BM3DCUDA](https://github.com/WolframRhodium/VapourSynth
 
 ## Requirements
 
-- macOS 10.13 (High Sierra) or later.
+- macOS 12.0 (Monterey) or later.
 
 - Metal-capable GPU:
   - Apple Silicon (M1, M2, M3, or newer)
   - Intel Mac with Metal-capable GPU (requires SIMD width/thread execution width of 32; older Intel GPUs may not be supported)
 
-- VapourSynth installed on macOS.
+- VapourSynth R74 or later on macOS.
+
+## Installation
+
+For VapourSynth R74 or later, install both VapourSynth and this plugin from PyPI:
+
+```bash
+python3 -m pip install -U vapoursynth vapoursynth-bm3dmetal
+vapoursynth config
+```
+
+The wheel installs `libbm3dmetal.dylib` into VapourSynth's Python package plugin
+directory and provides a `manifest.vs` for autoloading.
 
 ## Parameters
 
@@ -169,15 +181,23 @@ data format: fps
 
 ## Compilation
 
-Requires CMake 3.15 or later and Xcode Command Line Tools.
+Requires CMake 3.20 or later, Xcode Command Line Tools, and VapourSynth's Python
+package.
 
 ```bash
-cmake -S . -B build -D CMAKE_BUILD_TYPE=Release -D VAPOURSYNTH_INCLUDE_DIRECTORY="/path/to/vapoursynth/include"
+python3 -m pip install -U "VapourSynth>=74"
+```
+
+```bash
+cmake -S . -B build -D CMAKE_BUILD_TYPE=Release
 
 cmake --build build --config Release
 ```
 
 The compiled dynamic library (`libbm3dmetal.dylib`) will be located in the `build/lib` directory. Copy it to your VapourSynth plugins directory.
+
+If CMake cannot locate VapourSynth's headers from Python, pass
+`-D VAPOURSYNTH_INCLUDE_DIRECTORY="/path/to/vapoursynth/include"`.
 
 ## License
 

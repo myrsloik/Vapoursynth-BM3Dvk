@@ -1,10 +1,11 @@
 {
   "CompileFlags": {
     "Add": [
-      "-std=c++23",
+      "-std=c++20",
       "-Wall",
       "-Wextra",
       "-Wpedantic",
+      "-Wno-c23-extensions"
     ]
   },
   "Index": {

@@ -1,50 +1,56 @@
-# VapourSynth-BM3DMETAL
+# VapourSynth-BM3DVulkan
 
 Copyright© 2021 WolframRhodium
 
 Copyright© 2025 Sunflower Dolls
 
-BM3D denoising filter for VapourSynth, implemented in Metal.
+BM3D denoising filter for VapourSynth, running on the core's Vulkan device.
 
-Ported from [VapourSynth-BM3DCUDA](https://github.com/WolframRhodium/VapourSynth-BM3DCUDA).
+Ported from [VapourSynth-BM3DCUDA](https://github.com/WolframRhodium/VapourSynth-BM3DCUDA),
+by way of the Metal implementation this repository previously held.
 
 ## Description
 
 - Please check [VapourSynth-BM3D](https://github.com/HomeOfVapourSynthEvolution/VapourSynth-BM3D) for the original CPU implementation.
 
-- This Metal implementation leverages Apple's Metal API for GPU acceleration on macOS systems, providing efficient denoising on Apple Silicon and Intel Macs with Metal-capable GPUs.
+- This implementation is built on VapourSynth's Vulkan GPU API (API 4.3). Frames stay in
+  video memory for the whole chain, so a `BM3D` → `VAggregate` sequence never crosses the
+  PCIe bus in between, and BM3D composes with every other GPU resident filter without a
+  transfer.
+
+- The core owns the Vulkan device: it is created once and shared, so there is no per-plugin
+  device selection, no separate GPU memory budget, and no duplicate driver initialisation.
 
 ## Requirements
 
-- macOS 12.0 (Monterey) or later.
+- VapourSynth R80 or later, with a GPU and driver that support Vulkan 1.4. Check with
+  `core.vulkan_devices` from Python.
 
-- Metal-capable GPU:
-  - Apple Silicon (M1, M2, M3, or newer)
-  - Intel Mac with Metal-capable GPU (requires SIMD width/thread execution width of 32; older Intel GPUs may not be supported)
+- A device with 32- or 64-wide subgroups, which covers every current desktop GPU.
 
-- VapourSynth R74 or later on macOS.
+- Works on Linux, Windows and macOS (the latter through MoltenVK).
 
 ## Installation
 
-For VapourSynth R74 or later, install both VapourSynth and this plugin from PyPI:
-
 ```bash
-python3 -m pip install -U vapoursynth vapoursynth-bm3dmetal
+python3 -m pip install -U vapoursynth vapoursynth-bm3dvulkan
 vapoursynth config
 ```
 
-The wheel installs `libbm3dmetal.dylib` into VapourSynth's Python package plugin
-directory and provides a `manifest.vs` for autoloading.
+The wheel installs the plugin into VapourSynth's Python package plugin directory together
+with a `manifest.vs` for autoloading.
 
 ## Parameters
 
 ```python3
-bm3dmetal.BM3D(clip clip[, clip ref=None, float[] sigma=3.0, int[] block_step=8, int[] bm_range=9, int radius=0, int[] ps_num=2, int[] ps_range=4, bint chroma=False, int device_id=0, bool fast=False])
+bm3dvulkan.BM3D(clip clip[, clip ref=None, float[] sigma=3.0, int[] block_step=8, int[] bm_range=9, int radius=0, int[] ps_num=2, int[] ps_range=4, bint chroma=False, int extractor_exp=0])
 ```
 
 - clip:
 
-    The input clip. Must be of 32 bit float format. Each plane is denoised separately if `chroma` is set to `False`. Data of unprocessed planes is undefined. Frame properties of the output clip are copied from it.
+    The input clip. Must be of 32 bit float format. Each plane is denoised separately if `chroma` is set to `False`. Frame properties of the output clip are copied from it.
+
+    A CPU clip is uploaded automatically; pass `core.std.GPUUpload(clip)` explicitly to choose where in the graph the transfer happens.
 
 - ref:
 
@@ -53,15 +59,15 @@ bm3dmetal.BM3D(clip clip[, clip ref=None, float[] sigma=3.0, int[] block_step=8,
     Used in block-matching and as the reference in empirical Wiener filtering, i.e. `bm3d.Final` / `bm3d.VFinal`:
 
     ```python3
-    basic = core.bm3dmetal.BM3D(src, radius=0)
-    final = core.bm3dmetal.BM3D(src, ref=basic, radius=0)
+    basic = core.bm3dvulkan.BM3D(src, radius=0)
+    final = core.bm3dvulkan.BM3D(src, ref=basic, radius=0)
 
-    vbasic = core.bm3dmetal.BM3D(src, radius=radius_nonzero).bm3d.VAggregate(radius=radius_nonzero)
-    vfinal = core.bm3dmetal.BM3D(src, ref=vbasic, radius=r).bm3d.VAggregate(radius=r)
-    
+    vbasic = core.bm3dvulkan.BM3D(src, radius=radius_nonzero).bm3dvulkan.VAggregate(src=src, planes=[0,1,2])
+    vfinal = core.bm3dvulkan.BM3D(src, ref=vbasic, radius=r).bm3dvulkan.VAggregate(src=src, planes=[0,1,2])
+
     # alternatively, using the v2 interface
-    basic_or_vbasic = core.bm3dmetal.BM3Dv2(src, radius=r)
-    final_or_vfinal = core.bm3dmetal.BM3Dv2(src, ref=basic_or_vbasic, radius=r)
+    basic_or_vbasic = core.bm3dvulkan.BM3Dv2(src, radius=r)
+    final_or_vfinal = core.bm3dvulkan.BM3Dv2(src, ref=basic_or_vbasic, radius=r)
     ```
 
     corresponds to the followings (ignoring color space handling and other differences in implementation), respectively
@@ -79,6 +85,8 @@ bm3dmetal.BM3D(clip clip[, clip ref=None, float[] sigma=3.0, int[] block_step=8,
 
     The strength is similar (but not strictly equal) as `VapourSynth-BM3D` due to differences in implementation. (coefficient normalization is not implemented, for example)
 
+    A plane whose sigma is zero is not denoised. In spatial mode (`radius=0`) such planes are passed through from the source without a copy; in temporal mode they are zero filled, since the stacked output has no plane of the source's shape to share.
+
     Default `[3,3,3]`.
 
 - block_step, bm_range, radius, ps_num, ps_range:
@@ -88,7 +96,9 @@ bm3dmetal.BM3D(clip clip[, clip ref=None, float[] sigma=3.0, int[] block_step=8,
     If `chroma` is set to `True`, only the first value is in effect.
 
     Otherwise an array of values may be specified for each plane (except `radius`).
-    
+
+    `radius` is limited to 15.
+
     **Note**: It is generally not recommended to take a large value of `ps_num` as current implementations do not take duplicate block-matching candidates into account during temporary searching, which may leads to regression in denoising quality. This issue is not present in `VapourSynth-BM3D`.
 
     **Note2**: Lowering the value of "block_step" will be useful in reducing blocking artifacts at the cost of slower processing.
@@ -101,21 +111,6 @@ bm3dmetal.BM3D(clip clip[, clip ref=None, float[] sigma=3.0, int[] block_step=8,
 
     Default `False`.
 
-- device_id:
-
-    Set Metal GPU device to be used (for systems with multiple GPUs).
-
-    Default `0`.
-
-- fast:
-
-    Enables multi-threaded copy between CPU and GPU, consuming 4x more memory.
-    
-    - **Apple Silicon**: Enabling this option will degrade performance. Keep it disabled.
-    - **Intel Mac with AMD discrete GPU**: May (or may not) provide slight performance improvement.
-
-    Default: `False`.
-
 - extractor_exp:
 
     Used for deterministic (bitwise) output.
@@ -126,81 +121,74 @@ bm3dmetal.BM3D(clip clip[, clip ref=None, float[] sigma=3.0, int[] block_step=8,
 
     Default `0`. (non-determinism)
 
-- zero_init:
+## Differences from the Metal implementation
 
-    This parameter only has an effect in **temporal mode** (`radius > 0`).
+- `device_id` is gone: the core selects and owns the Vulkan device. Use
+  `core.set_vulkan_device()` to choose one.
 
-    It controls the output of planes that are **not** being processed (i.e., where `sigma` is set to 0).
+- `fast` is gone. It sized a pool of duplicate resources for concurrent frames; the core's
+  execution pool provides that automatically, with the memory scaling to frames actually in
+  flight rather than a fixed multiple.
 
-    - `True` (default): Unprocessed planes will be filled with zeros (resulting in a black image).
-    - `False`: Unprocessed planes will contain uninitialized data, which may appear as garbage or random noise.
+- `zero_init` is gone. Unprocessed planes of the stacked temporal output are always zeroed;
+  the flag only ever skipped that, leaving uninitialised data behind.
 
-    This parameter has no effect in spatial mode (`radius = 0`), as unprocessed planes are copied from the source clip. It also has no effect on planes that are actively being denoised.
-
-    Default: `True`.
+- `VAggregate` runs on the GPU rather than on the CPU, and takes `src` and `planes`
+  arguments. `BM3Dv2` wires it up for you.
 
 ## Notes
 
-- `bm3d.VAggregate` should be called after temporal filtering, as in `VapourSynth-BM3D`. Alternatively, you may use the `BM3Dv2()` interface for both spatial and temporal denoising in one step.
+- `VAggregate` should be called after temporal filtering, as in `VapourSynth-BM3D`.
+  Alternatively, use the `BM3Dv2()` interface for both spatial and temporal denoising in one
+  step.
 
-- The Metal implementation uses Metal Shading Language for GPU kernels, providing efficient computation on Apple platforms.
+- The kernel is one GLSL compute shader specialized at pipeline creation for the temporal,
+  chroma and Wiener variants, and for the device's subgroup width.
 
 ## Statistics
 
-GPU memory consumptions:
+GPU memory consumption, per frame in flight:
 
-`(ref ? 4 : 3) * (chroma ? 3 : 1) * (fast ? 4 : 1) * (2 * radius + 1) * size_of_a_single_frame`
+`(ref ? 2 : 1) * (chroma ? 3 : 1) * (2 * radius + 1) * size_of_a_single_frame` for the source stack,
+plus `(chroma ? 3 : 1) * (2 * radius + 1) * 2 * size_of_a_single_frame` for the accumulator.
+
+Both come from the core's pooled allocator, count against the VRAM limit
+(`core.max_vram_cache_size`) and are recycled between frames.
 
 Compute complexity:
 
 `(chroma ? 3 : 1) * ceil((width - 8) / block_step + 1) * ceil((height - 8) / block_step + 1) * ((2 * bm_range + 1) * (2 * bm_range + 1) + 2 * radius * ps_num * (2 * ps_range + 1) * (2 * ps_range + 1)) * (ref ? 1.5 : 1) + (radius > 0 ? width * height * (chroma ? 3 : 1) * 2 * radius : 0)`
 
-## Benchmarks
-
-input: 1920x1080
-
-- `chroma=False`: `GrayS`
-- `chroma=True`: `YUV444PS`
-
-data format: fps
-
-| radius | chroma | final | M2 Pro 32GB (macOS 15.6.1) | M4 16GB (macOS 26.1) |
-| ------ | ------ | ----- | -------------------------- | -------------------- |
-| 0      | False  | False | 120.31                     | 173.74               |
-| 0      | False  | True  | 102.20                     | 102.86               |
-| 0      | True   | False | 56.09                      | 71.08                |
-| 0      | True   | True  | 48.20                      | 49.18                |
-| 1      | False  | False | 63.20                      | 71.56                |
-| 1      | False  | True  | 57.61                      | 51.07                |
-| 1      | True   | False | 29.03                      | 24.93                |
-| 1      | True   | True  | 25.03                      | 25.39                |
-| 2      | False  | False | 44.35                      | 58.43                |
-| 2      | False  | True  | 39.69                      | 53.94                |
-| 2      | True   | False | 20.34                      | 16.46                |
-| 2      | True   | True  | 18.46                      | 11.99                |
-
 ## Compilation
 
-Requires CMake 3.20 or later, Xcode Command Line Tools, and VapourSynth's Python
-package.
+Requires CMake 3.20 or later, a C++20 compiler, VapourSynth's Python package (R80+, for its
+headers) and the Vulkan headers. Only the headers are needed — the plugin does not link
+against the Vulkan loader, because the core hands it every entry point already resolved.
 
 ```bash
-python3 -m pip install -U "VapourSynth>=74"
+python3 -m pip install -U "VapourSynth>=80"
 ```
 
 ```bash
 cmake -S . -B build -D CMAKE_BUILD_TYPE=Release
-
 cmake --build build --config Release
 ```
 
-The compiled dynamic library (`libbm3dmetal.dylib`) will be located in the `build/lib` directory. Copy it to your VapourSynth plugins directory.
+The compiled plugin (`libbm3dvulkan.so`, `bm3dvulkan.dll` or `libbm3dvulkan.dylib`) lands in
+`build/lib`. Copy it to your VapourSynth plugins directory.
 
-If CMake cannot locate VapourSynth's headers from Python, pass
-`-D VAPOURSYNTH_INCLUDE_DIRECTORY="/path/to/vapoursynth/include"`.
+If CMake cannot locate the headers automatically, pass
+`-D VAPOURSYNTH_INCLUDE_DIRECTORY=/path/to/vapoursynth/include` and/or
+`-D VULKAN_INCLUDE_DIRECTORY=/path/to/vulkan/include`.
+
+The kernel is compiled into the binary with C23 `#embed` where the compiler supports it
+(clang 19+, gcc 15+) and through a CMake-generated header otherwise, so MSVC and older gcc
+build without a separate step. Define `BM3DVK_NO_EMBED` to force the generated header.
 
 ## License
 
 This project is licensed under the GNU General Public License v3.0 or later (GPLv3+).
 
 Based on [VapourSynth-BM3DCUDA](https://github.com/WolframRhodium/VapourSynth-BM3DCUDA) by WolframRhodium, which is licensed under GPLv2 or later.
+
+The DCT kernels derive from [FFTW](https://www.fftw.org/) generated code, Copyright© 2003, 2007-14 Matteo Frigo and the Massachusetts Institute of Technology.

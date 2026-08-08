@@ -2,9 +2,10 @@
  * Copyright (C) 2021 WolframRhodium
  * Copyright (C) 2025 Sunflower Dolls
  *
- * BM3D for the VapourSynth Vulkan GPU API (API 4.3), a port of bm3dmetal.mm built on the
- * core's declaration driver. gpufilter.h is copied beside this file, as its header
- * instructs. GPL-3.0-or-later, like the original.
+ * BM3D for the VapourSynth Vulkan GPU API (API 4.3), built on the core's declaration
+ * driver. Ported from this project's earlier Metal implementation, itself a port of
+ * VapourSynth-BM3DCUDA; gpufilter.h is copied beside this file, as its header instructs.
+ * GPL-3.0-or-later, like both.
  *
  * What the driver replaces from the Metal implementation: the resource pool and ticket
  * semaphore (exec contexts), the per frame waitUntilCompleted (producer pairs; nothing
@@ -17,9 +18,10 @@
  * owns device selection, pipelining depth comes from the exec pool, and the unprocessed
  * planes of the tall temporal output are always zeroed.
  *
- * Build (no build system needed):
- *   clang-cl /LD /MD /O2 /EHsc /std:c++20 /bigobj /DNOMINMAX bm3dvulkan.cpp ^
- *     /I<this dir> /I<vapoursynth include> /I<vulkan sdk include> /Fe:bm3dvulkan.dll
+ * Built by CMake (see ../CMakeLists.txt), or by hand with a compiler that has C23 #embed:
+ *   clang-cl /LD /MD /O2 /EHsc /std:c++20 /bigobj /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+ *     bm3dvulkan.cpp /I<this dir> /I<vapoursynth include> /I<vulkan sdk include> ^
+ *     /Fe:bm3dvulkan.dll
  */
 
 #define VS_USE_API_43
@@ -101,13 +103,28 @@ void main() {
 }
 )";
 
+/* The kernel source ships inside the binary. #embed is the direct route and needs no build
+   step, but it is C23 (clang 19+, gcc 15+, not MSVC), so CMake also generates
+   shader_comp.h -- a raw string literal -- and that is used wherever #embed is missing.
+   Define BM3DVK_NO_EMBED to force the generated header even where #embed exists, which is
+   how the fallback gets exercised on a compiler that would not otherwise take it. */
+#if defined(__has_embed) && !defined(BM3DVK_NO_EMBED)
+#  if __has_embed("shader.comp")
+#    define BM3DVK_HAVE_EMBED 1
+#  endif
+#endif
+
+#ifdef BM3DVK_HAVE_EMBED
 const char bm3dGlsl[] = {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wc23-extensions"
+#  pragma clang diagnostic push
+#  pragma clang diagnostic ignored "-Wc23-extensions"
 #embed "shader.comp"
-#pragma clang diagnostic pop
+#  pragma clang diagnostic pop
     , '\0'
 };
+#else
+#  include "shader_comp.h"
+#endif
 
 /* The kernel runs on any subgroup width that is a multiple of its 8-lane clusters and that
    the workgroup can be sized to match; 32 and 64 cover real hardware. Prefer 32 (better

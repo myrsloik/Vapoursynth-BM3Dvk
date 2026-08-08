@@ -2,7 +2,7 @@
 BasedOnStyle: LLVM
 IndentWidth: 4
 ---
-Language: ObjC
+Language: Cpp
 DerivePointerAlignment: false
 PointerAlignment: Left
 ReflowComments: false

@@ -4,9 +4,9 @@
  * Copyright (C) 2021 WolframRhodium
  * Copyright (C) 2025 Sunflower Dolls
  *
- * GLSL port of shader.metal for the VapourSynth Vulkan GPU API. One source serves all
- * eight variants: TEMPORAL/CHROMA/FINAL are specialization constants and every branch on
- * them folds at pipeline creation. Licensed GPL-3.0-or-later like the original.
+ * The BM3D compute kernel, ported from this project's earlier Metal shader. One source
+ * serves all eight variants: TEMPORAL/CHROMA/FINAL are specialization constants and every
+ * branch on them folds at pipeline creation. Licensed GPL-3.0-or-later like the original.
  *
  * Layout contract with the host (identical to the Metal packed layout):
  *   binding 0 res: uint-typed accumulator. Non-chroma temporal binds the tall output

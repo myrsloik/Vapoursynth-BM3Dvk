@@ -50,7 +50,7 @@ class CMakeBuildHook(BuildHookInterface):
             arch = os.environ.get("CMAKE_OSX_ARCHITECTURES") or os.uname().machine
             if arch not in {"arm64", "x86_64"}:
                 raise RuntimeError(f"Unsupported macOS architecture for wheel build: {arch}")
-            platform_tag = next(tags.mac_platforms((12, 0), arch))
+            platform_tag = next(tags.mac_platforms((15, 0), arch))
         else:
             platform_tag = sysconfig.get_platform().replace("-", "_").replace(".", "_")
         build_data["tag"] = f"py3-none-{platform_tag}"
@@ -71,9 +71,9 @@ class CMakeBuildHook(BuildHookInterface):
             "-D", f"VAPOURSYNTH_INCLUDE_DIRECTORY={self._vapoursynth_include_dir()}",
         ]
         if sys.platform == "darwin":
-            env["MACOSX_DEPLOYMENT_TARGET"] = "12.0"
+            env["MACOSX_DEPLOYMENT_TARGET"] = "15.0"
             configure += [
-                "-D", "CMAKE_OSX_DEPLOYMENT_TARGET=12.0",
+                "-D", "CMAKE_OSX_DEPLOYMENT_TARGET=15.0",
                 "-D", f"CMAKE_OSX_ARCHITECTURES={arch}",
             ]
         subprocess.run(configure, check=True, env=env)

@@ -47,6 +47,10 @@ jobs:
           cmake -S Vulkan-Headers -B Vulkan-Headers/build -DCMAKE_INSTALL_PREFIX=/usr/local &&
           cmake --install Vulkan-Headers/build &&
           rm -rf Vulkan-Headers
+        # Must match the 15.0 hatch_build.py builds and tags with, or delocate compares the
+        # dylib against cibuildwheel's default target -- 10.15 on x86_64, 11.0 on arm64 -- and
+        # rejects the wheel it was just handed.
+        CIBW_ENVIRONMENT_MACOS: MACOSX_DEPLOYMENT_TARGET=15.0
         CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_34
         CIBW_MANYLINUX_AARCH64_IMAGE: manylinux_2_34
       with:
@@ -75,10 +79,11 @@ jobs:
     # this one from the environment on its own.
     - name: Install Vulkan headers
       run: |
+        $prefix = "$env:RUNNER_TEMP\vulkan".Replace('\', '/')
         git clone --depth 1 https://github.com/KhronosGroup/Vulkan-Headers.git "$env:RUNNER_TEMP\Vulkan-Headers"
-        cmake -S "$env:RUNNER_TEMP\Vulkan-Headers" -B "$env:RUNNER_TEMP\Vulkan-Headers\build" -DCMAKE_INSTALL_PREFIX="$env:RUNNER_TEMP\vulkan"
+        cmake -S "$env:RUNNER_TEMP\Vulkan-Headers" -B "$env:RUNNER_TEMP\Vulkan-Headers\build" -DCMAKE_INSTALL_PREFIX="$prefix"
         cmake --install "$env:RUNNER_TEMP\Vulkan-Headers\build"
-        echo "CMAKE_PREFIX_PATH=$env:RUNNER_TEMP\vulkan" >> $env:GITHUB_ENV
+        echo "CMAKE_PREFIX_PATH=$prefix" >> $env:GITHUB_ENV
 
     - name: Build
       run: uv build

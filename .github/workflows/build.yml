@@ -42,15 +42,20 @@ jobs:
           cmake -S Vulkan-Headers -B Vulkan-Headers/build -DCMAKE_INSTALL_PREFIX=/usr &&
           cmake --install Vulkan-Headers/build &&
           rm -rf Vulkan-Headers
+        # A writable prefix rather than /usr/local, which on the macOS runners has no include
+        # directory and cannot get one without sudo. CMAKE_PREFIX_PATH is how the project's
+        # find_package(VulkanHeaders) is pointed at it; hatch_build.py copies the environment
+        # through to cmake, and cmake reads that variable from it.
         CIBW_BEFORE_ALL_MACOS: >
+          rm -rf Vulkan-Headers &&
           git clone https://github.com/KhronosGroup/Vulkan-Headers.git --depth 1 &&
-          cmake -S Vulkan-Headers -B Vulkan-Headers/build -DCMAKE_INSTALL_PREFIX=/usr/local &&
+          cmake -S Vulkan-Headers -B Vulkan-Headers/build -DCMAKE_INSTALL_PREFIX=/tmp/vulkan &&
           cmake --install Vulkan-Headers/build &&
           rm -rf Vulkan-Headers
-        # Must match the 15.0 hatch_build.py builds and tags with, or delocate compares the
-        # dylib against cibuildwheel's default target -- 10.15 on x86_64, 11.0 on arm64 -- and
-        # rejects the wheel it was just handed.
-        CIBW_ENVIRONMENT_MACOS: MACOSX_DEPLOYMENT_TARGET=15.0
+        # The deployment target must match the 15.0 hatch_build.py builds and tags with, or
+        # delocate compares the dylib against cibuildwheel's default target -- 10.15 on x86_64,
+        # 11.0 on arm64 -- and rejects the wheel it was just handed.
+        CIBW_ENVIRONMENT_MACOS: MACOSX_DEPLOYMENT_TARGET=15.0 CMAKE_PREFIX_PATH=/tmp/vulkan
         CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_34
         CIBW_MANYLINUX_AARCH64_IMAGE: manylinux_2_34
       with:

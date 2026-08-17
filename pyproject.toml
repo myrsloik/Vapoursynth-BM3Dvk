@@ -1,4 +1,4 @@
-﻿[build-system]
+[build-system]
 requires = [
   "cmake>=3.20",
   "hatchling>=1.26",

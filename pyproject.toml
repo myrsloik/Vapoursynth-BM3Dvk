@@ -3,7 +3,7 @@ requires = [
   "cmake>=3.20",
   "hatchling>=1.26",
   "packaging>=24",
-  "VapourSynth>=80",
+  "VapourSynth>=80a1",
 ]
 build-backend = "hatchling.build"
 
@@ -30,7 +30,7 @@ classifiers = [
   "Programming Language :: Python :: 3",
   "Topic :: Multimedia :: Video",
 ]
-dependencies = ["VapourSynth>=80"]
+dependencies = ["VapourSynth>=80a1"]
 
 [project.urls]
 Repository = "https://github.com/Sunflower-Dolls/Vapoursynth-BM3DMETAL"

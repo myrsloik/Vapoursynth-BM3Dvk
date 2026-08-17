@@ -133,7 +133,7 @@ const char bm3dGlsl[] = {
    already runs that width unpinned). BM3DVK_FORCE_SUBGROUP=32|64 overrides for testing. */
 bool chooseSubgroup(VSCore *core, const VSAPI *vsapi, uint32_t &subgroupSize, uint32_t &pinnedSize,
     std::string &error) {
-    const VSVULKANAPI *vkapi = vsapi->getVulkanAPI(VSVULKAN_API_VERSION);
+    const VSVULKANAPI *vkapi = vsapi->getVulkanAPI();
     if (!vkapi) {
         error = "the Vulkan API is not available";
         return false;

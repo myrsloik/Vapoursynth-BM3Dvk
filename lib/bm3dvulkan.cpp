@@ -253,9 +253,11 @@ static void VS_CC BM3DCreate(const VSMap *in, VSMap *out, void *, VSCore *core, 
         p.process[i] = p.sigma[i] >= std::numeric_limits<float>::epsilon();
     }
     /* Scaled only once all three are known: a missing entry defaults to the previous one,
-       which has to be the value the user gave and not an already scaled copy of it. */
-    for (float &sigma : p.sigma)
-        sigma *= (3.0f / 4.0f) / 255.0f * 64.0f * (p.final_ ? 1.0f : 2.7f);
+       which has to be the value the user gave and not an already scaled copy of it. A plane
+       that is not processed gets exactly zero, which is what the chroma kernel tests for, so
+       the kernel never disagrees with the epsilon decision made above on the unscaled value. */
+    for (int i = 0; i < 3; ++i)
+        p.sigma[i] = p.process[i] ? p.sigma[i] * ((3.0f / 4.0f) / 255.0f * 64.0f * (p.final_ ? 1.0f : 2.7f)) : 0.0f;
     for (int i = 0; i < 3; ++i) {
         p.block_step[i] = static_cast<int>(vsapi->mapGetInt(in, "block_step", i, &err));
         if (err)
@@ -297,7 +299,13 @@ static void VS_CC BM3DCreate(const VSMap *in, VSMap *out, void *, VSCore *core, 
     if (p.chroma && !vsh::isSameVideoPresetFormat(pfYUV444PS, &vi->format, core, vsapi))
         return fail("chroma=true requires YUV444PS");
     int extractorExp = static_cast<int>(vsapi->mapGetInt(in, "extractor_exp", 0, &err));
-    p.extractor = (!err && extractorExp) ? std::ldexp(1.0f, extractorExp) : 0.0f;
+    if (err)
+        extractorExp = 0;
+    /* 2^128 is already infinite in single precision, and the pre-rounding then turns every
+       sample into NaN. */
+    if (extractorExp < 0 || extractorExp > 127)
+        return fail("extractor_exp must be in [0, 127]");
+    p.extractor = extractorExp ? std::ldexp(1.0f, extractorExp) : 0.0f;
 
     const int numPlanes = vi->format.numPlanes;
     int heavyGate = -1;
@@ -668,6 +676,8 @@ static void VS_CC VAggregateCreate(const VSMap *in, VSMap *out, void *, VSCore *
 
     std::array<bool, 3> process = { false, false, false };
     const int numPlaneArgs = vsapi->mapNumElements(in, "planes");
+    if (numPlaneArgs <= 0)
+        return fail("at least one plane must be given");
     for (int i = 0; i < numPlaneArgs; ++i) {
         const int pl = static_cast<int>(vsapi->mapGetInt(in, "planes", i, nullptr));
         if (pl < 0 || pl >= srcVi->format.numPlanes)
@@ -794,7 +804,9 @@ static void VS_CC BM3Dv2Create(const VSMap *in, VSMap *out, void *, VSCore *, co
 
     VSNode *src = vsapi->mapGetNode(in, "clip", 0, nullptr);
     const VSVideoInfo *srcVi = vsapi->getVideoInfo(src);
-    bool skip = true;
+    /* A variable format clip has no planes to count, and returning it unchanged would hide
+       the format error BM3D is about to give. */
+    bool skip = vsh::isConstantVideoFormat(srcVi);
     for (int i = 0; i < srcVi->format.numPlanes; ++i)
         skip &= !process[i];
     if (skip) {
@@ -823,7 +835,9 @@ static void VS_CC BM3Dv2Create(const VSMap *in, VSMap *out, void *, VSCore *, co
     }
 
     vsapi->mapConsumeNode(map, "src", src, maReplace);
-    for (int i = 0; i < 3; ++i) {
+    /* Only planes the clip has: VAggregate rejects an index past the format, and the sigma
+       defaults above run to three entries regardless of the plane count. */
+    for (int i = 0; i < srcVi->format.numPlanes; ++i) {
         if (process[i])
             vsapi->mapSetInt(map, "planes", i, maAppend);
     }

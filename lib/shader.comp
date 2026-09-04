@@ -302,10 +302,14 @@ void main() {
             current_patch[i] = src[srcp + i * pc.stride];
     }
 
+    /* The eight best start out as the reference block itself: a window near the frame edge
+       with a small bm_range holds fewer than eight candidates, and a slot never filled then
+       duplicates the reference block instead of dragging the top-left block of the frame
+       into the group and aggregating this group's estimate onto it. */
     const float initial_error = 3.402823466e+38;
     float errors8 = initial_error;
-    int index8_x = 0;
-    int index8_y = 0;
+    int index8_x = x;
+    int index8_y = y;
 
     /* Spatial block matching: exhaustive SSD over the window, maintaining the 8 best in
        ascending order across the cluster's lanes by shift-insertion. */
@@ -370,8 +374,8 @@ void main() {
             for (int t = 1; t <= radius; ++t) {
                 int temporal_index = radius + direction * t;
                 float frame_errors8 = initial_error;
-                int frame_index8_x = 0;
-                int frame_index8_y = 0;
+                int frame_index8_x = x;
+                int frame_index8_y = y;
 
                 int temporal_srcpc = temporal_index * temporal_stride + sub_lane_id;
 
@@ -493,13 +497,12 @@ void main() {
         else if (plane == 2)
             sigma = pc.sigma_v;
 
-        if (CHROMA) {
-            const float epsilon = 1.19209290e-07;
-            if (sigma < epsilon) {
-                srcPlaneBase += plane_stride;
-                resPlaneBase += plane_stride * 2;
-                continue;
-            }
+        /* The host decides which planes are denoised and hands exactly zero for the others,
+           so this is the same test it made rather than a second one on the scaled value. */
+        if (CHROMA && sigma == 0.0) {
+            srcPlaneBase += plane_stride;
+            resPlaneBase += plane_stride * 2;
+            continue;
         }
 
         float adaptive_weight;

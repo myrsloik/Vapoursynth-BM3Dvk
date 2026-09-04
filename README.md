@@ -43,7 +43,7 @@ with a `manifest.vs` for autoloading.
 ## Parameters
 
 ```python3
-bm3dvulkan.BM3D(clip clip[, clip ref=None, float[] sigma=3.0, int[] block_step=8, int[] bm_range=9, int radius=0, int[] ps_num=2, int[] ps_range=4, bint chroma=False, int extractor_exp=0])
+bm3dvk.BM3D(clip clip[, clip ref=None, float[] sigma=3.0, int[] block_step=8, int[] bm_range=9, int radius=0, int[] ps_num=2, int[] ps_range=4, bint chroma=False, int extractor_exp=0])
 ```
 
 - clip:
@@ -59,15 +59,15 @@ bm3dvulkan.BM3D(clip clip[, clip ref=None, float[] sigma=3.0, int[] block_step=8
     Used in block-matching and as the reference in empirical Wiener filtering, i.e. `bm3d.Final` / `bm3d.VFinal`:
 
     ```python3
-    basic = core.bm3dvulkan.BM3D(src, radius=0)
-    final = core.bm3dvulkan.BM3D(src, ref=basic, radius=0)
+    basic = core.bm3dvk.BM3D(src, radius=0)
+    final = core.bm3dvk.BM3D(src, ref=basic, radius=0)
 
-    vbasic = core.bm3dvulkan.BM3D(src, radius=radius_nonzero).bm3dvulkan.VAggregate(src=src, planes=[0,1,2])
-    vfinal = core.bm3dvulkan.BM3D(src, ref=vbasic, radius=r).bm3dvulkan.VAggregate(src=src, planes=[0,1,2])
+    vbasic = core.bm3dvk.BM3D(src, radius=radius_nonzero).bm3dvk.VAggregate(src=src, planes=[0,1,2])
+    vfinal = core.bm3dvk.BM3D(src, ref=vbasic, radius=r).bm3dvk.VAggregate(src=src, planes=[0,1,2])
 
     # alternatively, using the v2 interface
-    basic_or_vbasic = core.bm3dvulkan.BM3Dv2(src, radius=r)
-    final_or_vfinal = core.bm3dvulkan.BM3Dv2(src, ref=basic_or_vbasic, radius=r)
+    basic_or_vbasic = core.bm3dvk.BM3Dv2(src, radius=r)
+    final_or_vfinal = core.bm3dvk.BM3Dv2(src, ref=basic_or_vbasic, radius=r)
     ```
 
     corresponds to the followings (ignoring color space handling and other differences in implementation), respectively

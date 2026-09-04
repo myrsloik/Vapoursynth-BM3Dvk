@@ -34,6 +34,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -63,9 +64,9 @@ struct KernelParams {
 };
 
 struct CopyPush { uint32_t srcStride, dstStride, width, height, srcOffset, dstOffset; };
-struct ZeroPush { uint32_t words, offset; };
+struct ZeroPush { uint32_t stride, rows, offset; };
 struct AggPush { uint32_t srcStride, dstStride, width, height, srcOffset, weightRel; };
-struct VAggPush { uint32_t srcStride, dstStride, width, height; int32_t lo, hi; };
+struct VAggPush { uint32_t srcStride, dstStride, width, height; int32_t n, numFrames; };
 
 const char copyGlsl[] = R"(#version 460
 layout(local_size_x = 16, local_size_y = 16) in;
@@ -79,13 +80,17 @@ void main() {
 }
 )";
 
+/* Rows by stride rather than one flat run of words: Vulkan only guarantees 65535 workgroups
+   per dimension, which a flat dispatch over a stacked accumulator overruns from 1080p with
+   radius 1 on. */
 const char zeroGlsl[] = R"(#version 460
-layout(local_size_x = 256) in;
+layout(local_size_x = 16, local_size_y = 16) in;
 layout(std430, binding = 0) writeonly buffer D { uint d[]; };
-layout(push_constant) uniform PC { uint words, offset; } pc;
+layout(push_constant) uniform PC { uint stride, rows, offset; } pc;
 void main() {
-    uint i = gl_GlobalInvocationID.x;
-    if (i < pc.words) d[pc.offset + i] = 0u;
+    uint x = gl_GlobalInvocationID.x, y = gl_GlobalInvocationID.y;
+    if (x >= pc.stride || y >= pc.rows) return;
+    d[pc.offset + y * pc.stride + x] = 0u;
 }
 )";
 
@@ -204,6 +209,14 @@ struct PMeta {
     int slotIndex = 0; /* Copy: position in the packed stack; Agg/Unpack: packed plane */
 };
 
+/* The row stride of every packed layout, in elements. Scratch has no stride of its own and
+   the driver reports the output plane's for it, as it does for output bindings, and the
+   output plane has the source plane's width and format. Every pass here ends its binding
+   list with scratch or the output, so this is the same number in all of them, read from the
+   pass itself rather than from a source frame so that nothing assumes two frames of the same
+   shape share a stride. */
+uint32_t packedStride(const vsgpu::PassInfo &info) { return info.dstStrideElements(); }
+
 static void VS_CC BM3DCreate(const VSMap *in, VSMap *out, void *, VSCore *core, const VSAPI *vsapi) noexcept {
     VSNode *node = vsapi->mapGetNode(in, "clip", 0, nullptr);
     const VSVideoInfo *vi = vsapi->getVideoInfo(node);
@@ -238,8 +251,11 @@ static void VS_CC BM3DCreate(const VSMap *in, VSMap *out, void *, VSCore *core, 
         if (p.sigma[i] < 0.0f)
             return fail("sigma must be non-negative");
         p.process[i] = p.sigma[i] >= std::numeric_limits<float>::epsilon();
-        p.sigma[i] *= (3.0f / 4.0f) / 255.0f * 64.0f * (p.final_ ? 1.0f : 2.7f);
     }
+    /* Scaled only once all three are known: a missing entry defaults to the previous one,
+       which has to be the value the user gave and not an already scaled copy of it. */
+    for (float &sigma : p.sigma)
+        sigma *= (3.0f / 4.0f) / 255.0f * 64.0f * (p.final_ ? 1.0f : 2.7f);
     for (int i = 0; i < 3; ++i) {
         p.block_step[i] = static_cast<int>(vsapi->mapGetInt(in, "block_step", i, &err));
         if (err)
@@ -294,6 +310,20 @@ static void VS_CC BM3DCreate(const VSMap *in, VSMap *out, void *, VSCore *core, 
     if (heavyGate < 0)
         return fail("at least one plane needs a positive sigma (BM3Dv2 handles the all-zero case)");
 
+    /* The kernel clamps block origins to width - 8 and height - 8, so a smaller plane would
+       address before the start of its buffer. Only planes the kernel reads matter: with
+       chroma all three are 4:4:4 and read together, otherwise a sigma-zero plane is passed
+       through or zero filled without being read. */
+    for (int i = 0; i < numPlanes; ++i) {
+        if (!p.chroma && !p.process[i])
+            continue;
+        const int w = i ? vi->width >> vi->format.subSamplingW : vi->width;
+        const int h = i ? vi->height >> vi->format.subSamplingH : vi->height;
+        if (w < 8 || h < 8)
+            return fail("every denoised plane must be at least 8x8, plane " + std::to_string(i) + " is " +
+                std::to_string(w) + "x" + std::to_string(h));
+    }
+
     uint32_t sgSize = 0, pinnedSize = 0;
     std::string sgError;
     if (!chooseSubgroup(core, vsapi, sgSize, pinnedSize, sgError))
@@ -347,8 +377,6 @@ static void VS_CC BM3DCreate(const VSMap *in, VSMap *out, void *, VSCore *core, 
         prog.glsl = zeroGlsl;
         prog.storageBufferCount = 1;
         prog.pushConstantBytes = sizeof(ZeroPush);
-        prog.localSizeX = 256;
-        prog.localSizeY = 1;
         desc.programs.push_back(std::move(prog));
     }
     if (!temporal) {
@@ -362,7 +390,7 @@ static void VS_CC BM3DCreate(const VSMap *in, VSMap *out, void *, VSCore *core, 
     /* Scratch 0 is the packed source stack; scratch 1 the accumulator, except for
        non-chroma temporal where the tall output plane itself accumulates. Sizes use a
        256-byte stride bound, which the core's plane stride never exceeds; runtime offsets
-       use the actual stride carried in frameParams. */
+       use the actual output plane stride, see packedStride. */
     auto strideBound = [](int width) {
         return (static_cast<VkDeviceSize>(width) * 4 + 255) / 256 * 256;
     };
@@ -381,27 +409,21 @@ static void VS_CC BM3DCreate(const VSMap *in, VSMap *out, void *, VSCore *core, 
     if (!resIsOutput)
         desc.scratchDefs.push_back({ resBytes, 0 });
 
-    /* The actual per-plane strides only exist once frames do; prepareFrame publishes them
-       for fillPush and the reshape lambdas, since all-scratch passes have no plane binding
-       to read a stride from. */
-    desc.frameParamCount = 3;
-    desc.prepareFrame = [numPlanes](int, const VSFrame *const *sources, int, const VSAPI *api,
-        uint32_t *params, std::string &) {
-        for (int pl = 0; pl < numPlanes && pl < 3; ++pl)
-            params[pl] = static_cast<uint32_t>(api->getStride(sources[0], pl) / 4);
-        return true;
-    };
-
     auto gateHeavy = [&](vsgpu::Pass &pass) {
         for (int i = 0; i < 3; ++i)
             pass.planes[i] = p.chroma ? (i == heavyGate) : p.process[i];
     };
-    /* Chroma packs use plane 0's stride slot (4:4:4, all equal); non-chroma each plane its
-       own. */
     const bool chroma = p.chroma;
-    auto strideSlot = [chroma](const vsgpu::PassInfo &info) { return chroma ? 0 : info.plane; };
 
     std::vector<PMeta> meta;
+
+    /* A zero pass covers packF source heights of rows, one packed stride wide. */
+    auto zeroReshape = [](int packF) {
+        return [packF](vsgpu::PassInfo &info) {
+            info.width = packedStride(info);
+            info.height = static_cast<uint32_t>(packF) * info.srcHeight;
+        };
+    };
 
     /* Zero the accumulator: the whole res scratch (one pass, all packed planes at once),
        or the tall output plane per plane. */
@@ -410,24 +432,16 @@ static void VS_CC BM3DCreate(const VSMap *in, VSMap *out, void *, VSCore *core, 
         pass.program = 2;
         pass.bindings.push_back(vsgpu::Operand::scratch(1));
         gateHeavy(pass);
-        const int packF = numPack * T * 2;
-        pass.reshape = [packF, strideSlot](vsgpu::PassInfo &info) {
-            info.width = packF * info.srcHeight * info.frameParams[strideSlot(info)];
-            info.height = 1;
-        };
+        pass.reshape = zeroReshape(numPack * T * 2);
         desc.passes.push_back(std::move(pass));
-        meta.push_back({ PMeta::ZeroRes, packF });
+        meta.push_back({ PMeta::ZeroRes, 0 });
     } else {
         vsgpu::Pass pass;
         pass.program = 2;
         pass.bindings.push_back(vsgpu::Operand::output());
-        const int packF = T * 2;
-        pass.reshape = [packF, strideSlot](vsgpu::PassInfo &info) {
-            info.width = packF * info.srcHeight * info.frameParams[strideSlot(info)];
-            info.height = 1;
-        };
+        pass.reshape = zeroReshape(T * 2);
         desc.passes.push_back(std::move(pass));
-        meta.push_back({ PMeta::ZeroRes, packF });
+        meta.push_back({ PMeta::ZeroRes, 0 });
     }
     /* Chroma temporal: sigma-zero planes of the tall output get only a zero pass. */
     if (temporal && p.chroma) {
@@ -439,19 +453,18 @@ static void VS_CC BM3DCreate(const VSMap *in, VSMap *out, void *, VSCore *core, 
             pass.bindings.push_back(vsgpu::Operand::output());
             for (int i = 0; i < 3; ++i)
                 pass.planes[i] = (i == pl);
-            const int packF = T * 2;
-            pass.reshape = [packF, strideSlot](vsgpu::PassInfo &info) {
-                info.width = packF * info.srcHeight * info.frameParams[strideSlot(info)];
-                info.height = 1;
-            };
+            pass.reshape = zeroReshape(T * 2);
             desc.passes.push_back(std::move(pass));
-            meta.push_back({ PMeta::ZeroOut, packF });
+            meta.push_back({ PMeta::ZeroOut, 0 });
         }
     }
 
     /* Pack the source stack: ref clip first in final mode, then per packed plane, per tap,
        exactly the Metal d_src layout. Slots advance positionally even for planes the
-       kernel will skip. */
+       kernel will skip. Each copy reads a frame and writes its own slot, disjoint from the
+       zero pass's buffer and from every other slot, so none of them needs the barrier the
+       driver would otherwise put in front of it -- up to 186 of them in chroma final mode
+       at the largest radius. */
     for (int outer = 0; outer < clips; ++outer) {
         const int clipIdx = p.final_ ? (outer == 0 ? 1 : 0) : 0;
         for (int pack = 0; pack < numPack; ++pack) {
@@ -463,6 +476,7 @@ static void VS_CC BM3DCreate(const VSMap *in, VSMap *out, void *, VSCore *core, 
                     : vsgpu::Operand::source(clipIdx, tap - p.radius));
                 pass.bindings.push_back(vsgpu::Operand::scratch(0));
                 pass.geometryFromBinding = 0;
+                pass.independent = true;
                 gateHeavy(pass);
                 desc.passes.push_back(std::move(pass));
                 meta.push_back({ PMeta::Copy, (outer * numPack + pack) * T + tap });
@@ -516,14 +530,15 @@ static void VS_CC BM3DCreate(const VSMap *in, VSMap *out, void *, VSCore *core, 
 
     const BM3DParams pv = p;
     const int Tv = T;
-    desc.fillPush = [meta, pv, Tv, strideSlot, chroma](const vsgpu::PassInfo &info, void *pushData) {
+    desc.fillPush = [meta, pv, Tv, chroma](const vsgpu::PassInfo &info, void *pushData) {
         const PMeta &m = meta[info.pass];
-        const uint32_t stride = info.frameParams[strideSlot(info)];
+        const uint32_t stride = packedStride(info);
         const uint32_t H = info.srcHeight;
         switch (m.kind) {
         case PMeta::ZeroRes:
         case PMeta::ZeroOut: {
-            ZeroPush push = { static_cast<uint32_t>(m.slotIndex) * H * stride, 0 };
+            /* The reshape already made the dispatch stride wide by packF * H rows tall. */
+            ZeroPush push = { info.width, info.height, 0 };
             std::memcpy(pushData, &push, sizeof(push));
             break;
         }
@@ -615,22 +630,51 @@ static void VS_CC BM3DCreate(const VSMap *in, VSMap *out, void *, VSCore *core, 
 }
 
 /* Temporal aggregation of BM3D's stacked output, the CPU vDSP half of the original moved
-   onto the device: per output pixel, sum the wdst and weight rows of every neighbouring
-   tall frame's slot for this frame and divide. */
+   onto the device. Slot z of the tall frame made from source frame m holds what denoising m
+   contributed to frame m + z - radius, with the tap frames clamped to the clip at both
+   ends. Per output pixel, sum the wdst and weight rows of every slot that landed on this
+   frame and divide. In the interior that is one slot per neighbour; at the clip edges the
+   clamping makes several slots of one frame land here and several neighbour offsets
+   resolve to the same frame, so the kernel walks the slots explicitly and skips a frame it
+   has already visited rather than assuming one slot per binding. */
 static void VS_CC VAggregateCreate(const VSMap *in, VSMap *out, void *, VSCore *core, const VSAPI *vsapi) noexcept {
     VSNode *node = vsapi->mapGetNode(in, "clip", 0, nullptr);
     VSNode *srcNode = vsapi->mapGetNode(in, "src", 0, nullptr);
     const VSVideoInfo *vi = vsapi->getVideoInfo(node);
     const VSVideoInfo *srcVi = vsapi->getVideoInfo(srcNode);
 
-    const int radius = (vi->height / srcVi->height - 2) / 4;
+    auto fail = [&](const std::string &msg) {
+        vsapi->mapSetError(out, ("VAggregate: " + msg).c_str());
+        vsapi->freeNode(node);
+        vsapi->freeNode(srcNode);
+    };
+
+    if (!vsh::isConstantVideoFormat(vi) || !vsh::isConstantVideoFormat(srcVi))
+        return fail("only constant format input supported");
+    if (vi->format.sampleType != stFloat || vi->format.bitsPerSample != 32)
+        return fail("clip must be the 32 bit float output of BM3D");
+    if (!vsh::isSameVideoFormat(&vi->format, &srcVi->format) || vi->width != srcVi->width ||
+        vi->numFrames != srcVi->numFrames)
+        return fail("src must match clip in format, width and number of frames");
+    /* A temporal BM3D output is 2 * (2 * radius + 1) source heights tall; anything else is
+       not one, and deriving a radius from it would read past the frame. */
+    const int ratio = vi->height / srcVi->height;
+    if (vi->height % srcVi->height != 0 || ratio < 6 || (ratio - 2) % 4 != 0)
+        return fail("clip must be the output of BM3D with radius > 0 and src the clip it was made from");
+    const int radius = (ratio - 2) / 4;
+    if (radius > 15)
+        return fail("radius must be at most 15");
     const int T = 2 * radius + 1;
 
     std::array<bool, 3> process = { false, false, false };
-    for (int i = 0; i < vsapi->mapNumElements(in, "planes"); ++i) {
+    const int numPlaneArgs = vsapi->mapNumElements(in, "planes");
+    for (int i = 0; i < numPlaneArgs; ++i) {
         const int pl = static_cast<int>(vsapi->mapGetInt(in, "planes", i, nullptr));
-        if (pl >= 0 && pl < 3)
-            process[pl] = true;
+        if (pl < 0 || pl >= srcVi->format.numPlanes)
+            return fail("plane index out of range");
+        if (process[pl])
+            return fail("plane specified twice");
+        process[pl] = true;
     }
 
     vsgpu::FilterDesc desc;
@@ -649,18 +693,30 @@ static void VS_CC VAggregateCreate(const VSMap *in, VSMap *out, void *, VSCore *
         glsl += "layout(std430, binding = " + std::to_string(i) + ") readonly buffer S" +
             std::to_string(i) + " { float s" + std::to_string(i) + "[]; };\n";
     glsl += "layout(std430, binding = " + std::to_string(T) + ") writeonly buffer D { float d[]; };\n"
-        "layout(push_constant) uniform PC { uint srcStride, dstStride, width, height; int lo, hi; } pc;\n"
+        "layout(push_constant) uniform PC { uint srcStride, dstStride, width, height; int n, numFrames; } pc;\n"
+        "const int R = " + std::to_string(radius) + ";\n"
         "void main() {\n"
         "    uint x = gl_GlobalInvocationID.x, y = gl_GlobalInvocationID.y;\n"
         "    if (x >= pc.width || y >= pc.height) return;\n"
         "    float sum = 0.0, wsum = 0.0;\n"
-        "    int z; uint o;\n";
+        "    int last = pc.numFrames - 1;\n"
+        "    int prev = -1, m;\n";
+    /* Binding i is the tall frame at offset i - R, clamped to the clip: the frame it was
+       made from is m, and it is skipped when the previous binding already resolved to m.
+       Every slot whose (clamped) target is this frame is summed. */
     for (int i = 0; i < T; ++i) {
         const std::string s = "s" + std::to_string(i);
-        glsl += "    z = clamp(" + std::to_string(2 * radius - i) + ", pc.lo, pc.hi);\n"
-            "    o = (uint(z) * 2u * pc.height + y) * pc.srcStride + x;\n"
-            "    sum += " + s + "[o];\n"
-            "    wsum += " + s + "[o + pc.height * pc.srcStride];\n";
+        glsl += "    m = clamp(pc.n + (" + std::to_string(i - radius) + "), 0, last);\n"
+            "    if (m != prev) {\n"
+            "        for (int z = 0; z <= 2 * R; ++z) {\n"
+            "            if (clamp(m + z - R, 0, last) == pc.n) {\n"
+            "                uint o = (uint(z) * 2u * pc.height + y) * pc.srcStride + x;\n"
+            "                sum += " + s + "[o];\n"
+            "                wsum += " + s + "[o + pc.height * pc.srcStride];\n"
+            "            }\n"
+            "        }\n"
+            "        prev = m;\n"
+            "    }\n";
     }
     glsl += "    d[y * pc.dstStride + x] = sum / (wsum > 0.0 ? wsum : 1.0);\n"
         "}\n";
@@ -682,25 +738,32 @@ static void VS_CC VAggregateCreate(const VSMap *in, VSMap *out, void *, VSCore *
         return clip == 0 ? std::clamp(n + frameOffset, 0, numFrames - 1) : n;
     };
 
-    desc.frameParamCount = 2;
-    const int nf = numFrames;
-    const int rad = radius;
-    desc.prepareFrame = [nf, rad](int n, const VSFrame *const *, int, const VSAPI *,
-        uint32_t *params, std::string &) {
-        params[0] = static_cast<uint32_t>(n - nf + 1 + rad);
-        params[1] = static_cast<uint32_t>(n + rad);
+    /* The kernel needs the frame number to resolve the clamped taps; nothing else varies per
+       frame. */
+    desc.frameParamCount = 1;
+    desc.prepareFrame = [](int n, const VSFrame *const *, int, const VSAPI *, uint32_t *params, std::string &) {
+        params[0] = static_cast<uint32_t>(n);
         return true;
     };
 
-    desc.fillPush = [](const vsgpu::PassInfo &info, void *pushData) {
+    desc.fillPush = [numFrames](const vsgpu::PassInfo &info, void *pushData) {
         VAggPush push = {};
         push.srcStride = info.strideElements[0];
         push.dstStride = info.dstStrideElements();
         push.width = info.width;
         push.height = info.height;
-        push.lo = static_cast<int32_t>(info.frameParams[0]);
-        push.hi = static_cast<int32_t>(info.frameParams[1]);
+        push.n = static_cast<int32_t>(info.frameParams[0]);
+        push.numFrames = numFrames;
         std::memcpy(pushData, &push, sizeof(push));
+    };
+
+    /* The stacked clip's bookkeeping properties describe an intermediate; the aggregated
+       frame is ordinary video again and should not carry them, as the original's did not. */
+    desc.finishFrame = [](int, VSFrame *dst, const VSFrame *const *, int, const uint32_t *, VSCore *,
+        const VSAPI *api) {
+        VSMap *props = api->getFramePropertiesRW(dst);
+        api->mapDeleteKey(props, "BM3D_V_radius");
+        api->mapDeleteKey(props, "BM3D_V_process");
     };
 
     VSFilterDependency deps[] = {

@@ -3,7 +3,7 @@ requires = [
   "cmake>=3.20",
   "hatchling>=1.26",
   "packaging>=24",
-  "VapourSynth>=80a1",
+  "VapourSynth>=80rc1",
 ]
 build-backend = "hatchling.build"
 

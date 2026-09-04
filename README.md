@@ -117,9 +117,31 @@ bm3dvk.BM3D(clip clip[, clip ref=None, float[] sigma=3.0, int[] block_step=8, in
 
     [Pre-rounding](https://ieeexplore.ieee.org/document/6545904) is employed for associative floating-point summation.
 
-    The value should be a positive integer not less than 3, and may need to be higher depending on the source video and filter parameters.
+    The value should be a positive integer not less than 3, and may need to be higher depending on the source video and filter parameters. Values above 127 are rejected, since 2^128 is not representable in single precision.
 
     Default `0`. (non-determinism)
+
+```python3
+bm3dvk.VAggregate(clip clip, clip src, int[] planes)
+```
+
+- clip:
+
+    The stacked output of `BM3D` with `radius > 0`. Its height is `2 * (2 * radius + 1)` times that of `src`, which is how the radius is recovered.
+
+- src:
+
+    The clip `BM3D` was given. Planes not listed in `planes` are taken from it unchanged, and it supplies the output's format and dimensions.
+
+- planes:
+
+    The planes to aggregate. Each must be one `BM3D` denoised: a plane whose sigma was zero holds no data in `clip`, and asking for it is an error, so leave it out and let `src` supply it. `BM3Dv2` builds this list from `sigma` for you.
+
+```python3
+bm3dvk.BM3Dv2(clip clip[, clip ref=None, float[] sigma=3.0, int[] block_step=8, int[] bm_range=9, int radius=0, int[] ps_num=2, int[] ps_range=4, bint chroma=False, int extractor_exp=0])
+```
+
+Takes exactly the arguments of `BM3D`. Runs `BM3D`, and when `radius > 0` follows it with `VAggregate` over the planes whose sigma is non-zero, so the result is ordinary video in both the spatial and the temporal case. When every plane's sigma is zero the input is returned unchanged.
 
 ## Differences from the Metal implementation
 

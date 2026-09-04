@@ -44,6 +44,14 @@ add_library(bm3dvulkan SHARED
     "${_shader_header}"
 )
 
+# On the #embed path the shader is read by the compiler, not included, so whether a change
+# to it rebuilds the object depends on the compiler listing embedded files in its depfile.
+# Stated here instead so it rebuilds on every compiler; harmless on the header path, where
+# the regenerated header already forces it.
+set_source_files_properties(bm3dvulkan.cpp PROPERTIES
+    OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shader.comp"
+)
+
 target_include_directories(bm3dvulkan PRIVATE
     ${VAPOURSYNTH_INCLUDE_DIRECTORY}
     ${_vulkan_headers}

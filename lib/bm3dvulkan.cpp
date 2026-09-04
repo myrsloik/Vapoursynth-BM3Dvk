@@ -749,10 +749,33 @@ static void VS_CC VAggregateCreate(const VSMap *in, VSMap *out, void *, VSCore *
     };
 
     /* The kernel needs the frame number to resolve the clamped taps; nothing else varies per
-       frame. */
+       frame. The same hook checks the request against what BM3D recorded on the frame: a
+       plane it zero filled would aggregate to black without a word otherwise, and a radius
+       other than the one the height implies means clip and src do not belong together.
+       Bindings are in offset order, so the frame being aggregated, offset 0, is at radius. */
+    const std::array<bool, 3> proc = process;
     desc.frameParamCount = 1;
-    desc.prepareFrame = [](int n, const VSFrame *const *, int, const VSAPI *, uint32_t *params, std::string &) {
+    desc.prepareFrame = [proc, radius](int n, const VSFrame *const *sources, int numSources,
+        const VSAPI *api, uint32_t *params, std::string &error) {
         params[0] = static_cast<uint32_t>(n);
+        if (radius >= numSources)
+            return true;
+        const VSMap *props = api->getFramePropertiesRO(sources[radius]);
+        int err = 0;
+        const int64_t propRadius = api->mapGetInt(props, "BM3D_V_radius", 0, &err);
+        if (!err && propRadius != radius) {
+            error = "VAggregate: clip was made with radius " + std::to_string(propRadius) +
+                ", but its height against src implies " + std::to_string(radius);
+            return false;
+        }
+        const int numProc = api->mapNumElements(props, "BM3D_V_process");
+        for (int i = 0; i < 3 && i < numProc; ++i) {
+            if (proc[i] && !api->mapGetInt(props, "BM3D_V_process", i, nullptr)) {
+                error = "VAggregate: plane " + std::to_string(i) +
+                    " was not denoised by BM3D (sigma 0); leave it out of planes so src supplies it";
+                return false;
+            }
+        }
         return true;
     };
 

@@ -643,8 +643,8 @@ static void VS_CC BM3DCreate(const VSMap *in, VSMap *out, void *, VSCore *core, 
    ends. Per output pixel, sum the wdst and weight rows of every slot that landed on this
    frame and divide. In the interior that is one slot per neighbour; at the clip edges the
    clamping makes several slots of one frame land here and several neighbour offsets
-   resolve to the same frame, so the kernel walks the slots explicitly and skips a frame it
-   has already visited rather than assuming one slot per binding. */
+   resolve to the same frame, so the kernel sums the slot range that lands here and skips a
+   frame it has already visited rather than assuming one slot per binding. */
 static void VS_CC VAggregateCreate(const VSMap *in, VSMap *out, void *, VSCore *core, const VSAPI *vsapi) noexcept {
     VSNode *node = vsapi->mapGetNode(in, "clip", 0, nullptr);
     VSNode *srcNode = vsapi->mapGetNode(in, "src", 0, nullptr);
@@ -676,8 +676,6 @@ static void VS_CC VAggregateCreate(const VSMap *in, VSMap *out, void *, VSCore *
 
     std::array<bool, 3> process = { false, false, false };
     const int numPlaneArgs = vsapi->mapNumElements(in, "planes");
-    if (numPlaneArgs <= 0)
-        return fail("at least one plane must be given");
     for (int i = 0; i < numPlaneArgs; ++i) {
         const int pl = static_cast<int>(vsapi->mapGetInt(in, "planes", i, nullptr));
         if (pl < 0 || pl >= srcVi->format.numPlanes)
@@ -713,17 +711,19 @@ static void VS_CC VAggregateCreate(const VSMap *in, VSMap *out, void *, VSCore *
         "    int prev = -1, m;\n";
     /* Binding i is the tall frame at offset i - R, clamped to the clip: the frame it was
        made from is m, and it is skipped when the previous binding already resolved to m.
-       Every slot whose (clamped) target is this frame is summed. */
+       Slot z0 = n - m + R is the one aimed at this frame, and always within the tall frame
+       since m is at most R away from n. At the first frame every lower slot was clamped
+       onto it as well, at the last frame every higher one, so the range widens there and is
+       otherwise the single slot. */
     for (int i = 0; i < T; ++i) {
         const std::string s = "s" + std::to_string(i);
         glsl += "    m = clamp(pc.n + (" + std::to_string(i - radius) + "), 0, last);\n"
             "    if (m != prev) {\n"
-            "        for (int z = 0; z <= 2 * R; ++z) {\n"
-            "            if (clamp(m + z - R, 0, last) == pc.n) {\n"
-            "                uint o = (uint(z) * 2u * pc.height + y) * pc.srcStride + x;\n"
-            "                sum += " + s + "[o];\n"
-            "                wsum += " + s + "[o + pc.height * pc.srcStride];\n"
-            "            }\n"
+            "        int z0 = pc.n - m + R;\n"
+            "        for (int z = pc.n == 0 ? 0 : z0; z <= (pc.n == last ? 2 * R : z0); ++z) {\n"
+            "            uint o = (uint(z) * 2u * pc.height + y) * pc.srcStride + x;\n"
+            "            sum += " + s + "[o];\n"
+            "            wsum += " + s + "[o + pc.height * pc.srcStride];\n"
             "        }\n"
             "        prev = m;\n"
             "    }\n";
@@ -817,7 +817,10 @@ static void VS_CC BM3Dv2Create(const VSMap *in, VSMap *out, void *, VSCore *, co
     process.fill(true);
     const int numSigma = vsapi->mapNumElements(in, "sigma");
     for (int i = 0; i < std::min(3, numSigma); ++i) {
-        if (vsapi->mapGetFloat(in, "sigma", i, nullptr) < std::numeric_limits<float>::epsilon())
+        /* Only a zero skips the plane; a negative value stays "processed" so that the BM3D
+           invoke below rejects it rather than the all-zero shortcut returning the clip. */
+        const double s = vsapi->mapGetFloat(in, "sigma", i, nullptr);
+        if (s >= 0.0 && s < std::numeric_limits<float>::epsilon())
             process[i] = false;
     }
     if (numSigma > 0) {

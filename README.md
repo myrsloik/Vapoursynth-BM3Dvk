@@ -203,6 +203,10 @@ If CMake cannot locate the headers automatically, pass
 `-D VAPOURSYNTH_INCLUDE_DIRECTORY=/path/to/vapoursynth/include` and/or
 `-D VULKAN_INCLUDE_DIRECTORY=/path/to/vulkan/include`.
 
+`python3 test/smoke.py [path/to/plugin]` runs every variant of the kernel on the core's
+device and checks the results; without a path it tests the plugin VapourSynth autoloads.
+It needs numpy.
+
 The kernel is compiled into the binary with C23 `#embed` where the compiler supports it
 (clang 19+, gcc 15+) and through a CMake-generated header otherwise, so MSVC and older gcc
 build without a separate step. Define `BM3DVK_NO_EMBED` to force the generated header.

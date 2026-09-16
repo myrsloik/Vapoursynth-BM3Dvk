@@ -131,18 +131,13 @@ const char bm3dGlsl[] = {
 #  include "shader_comp.h"
 #endif
 
-/* What the device decides about the layouts here, read once per filter instance. Facts
-   only; what a filter makes of them is its own business, so VAggregate is not held to the
-   kernel's subgroup needs. */
-struct DeviceCaps {
-    uint32_t maxStorageBuffers = 0;   /* per stage: VAggregate binds one tall frame per tap */
-    VkDeviceSize maxStorageRange = 0; /* the most one binding may cover; the driver binds buffers whole */
-    uint32_t subgroupSize = 0;        /* the width the device reports running compute at */
-    uint32_t minSubgroupSize = 0;     /* the range a compute pipeline may be pinned to, both 0 when */
-    uint32_t maxSubgroupSize = 0;     /* the device cannot pin */
-};
-
-bool queryDevice(VSCore *core, const VSAPI *vsapi, DeviceCaps &caps, std::string &error) {
+/* The kernel runs on any subgroup width that is a multiple of its 8-lane clusters and that
+   the workgroup can be sized to match; 32 and 64 cover real hardware. Prefer 32 (better
+   register occupancy for a kernel this heavy), fall back to 64 for wave64-only devices.
+   subgroupSize receives the chosen width, pinnedSize the value to pin (0 when the device
+   already runs that width unpinned). BM3DVK_FORCE_SUBGROUP=32|64 overrides for testing. */
+bool chooseSubgroup(VSCore *core, const VSAPI *vsapi, uint32_t &subgroupSize, uint32_t &pinnedSize,
+    std::string &error) {
     const VSVULKANAPI *vkapi = vsapi->getVulkanAPI();
     if (!vkapi) {
         error = "the Vulkan API is not available";
@@ -165,22 +160,8 @@ bool queryDevice(VSCore *core, const VSAPI *vsapi, DeviceCaps &caps, std::string
     VkPhysicalDeviceProperties2 props2 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2 };
     props2.pNext = &props11;
     vk->vkGetPhysicalDeviceProperties2(handles.physicalDevice, &props2);
-    caps.maxStorageBuffers = props2.properties.limits.maxPerStageDescriptorStorageBuffers;
-    caps.maxStorageRange = props2.properties.limits.maxStorageBufferRange;
-    caps.subgroupSize = props11.subgroupSize;
-    if (props13.requiredSubgroupSizeStages & VK_SHADER_STAGE_COMPUTE_BIT) {
-        caps.minSubgroupSize = props13.minSubgroupSize;
-        caps.maxSubgroupSize = props13.maxSubgroupSize;
-    }
-    return true;
-}
 
-/* The kernel runs on any subgroup width that is a multiple of its 8-lane clusters and that
-   the workgroup can be sized to match; 32 and 64 cover real hardware. Prefer 32 (better
-   register occupancy for a kernel this heavy), fall back to 64 for wave64-only devices.
-   workgroup receives the chosen width, pinned the value to pin (0 when the device already
-   runs that width unpinned). BM3DVK_FORCE_SUBGROUP=32|64 overrides for testing. */
-bool chooseSubgroup(const DeviceCaps &caps, uint32_t &workgroup, uint32_t &pinned, std::string &error) {
+    const bool canPin = (props13.requiredSubgroupSizeStages & VK_SHADER_STAGE_COMPUTE_BIT) != 0;
     uint32_t candidates[2] = { 32, 64 };
     int numCandidates = 2;
     if (const char *forced = std::getenv("BM3DVK_FORCE_SUBGROUP")) {
@@ -193,20 +174,19 @@ bool chooseSubgroup(const DeviceCaps &caps, uint32_t &workgroup, uint32_t &pinne
     }
     for (int i = 0; i < numCandidates; ++i) {
         const uint32_t c = candidates[i];
-        /* An unpinnable device has both bounds at 0, which no candidate satisfies. */
-        if (caps.minSubgroupSize <= c && c <= caps.maxSubgroupSize) {
-            workgroup = c;
-            pinned = c;
+        if (canPin && props13.minSubgroupSize <= c && c <= props13.maxSubgroupSize) {
+            subgroupSize = c;
+            pinnedSize = c;
             return true;
         }
-        if (caps.subgroupSize == c) {
-            workgroup = c;
-            pinned = 0;
+        if (props11.subgroupSize == c) {
+            subgroupSize = c;
+            pinnedSize = 0;
             return true;
         }
     }
     error = "this kernel needs 32- or 64-wide subgroups, which this device cannot provide (reports " +
-        std::to_string(caps.subgroupSize) + ")";
+        std::to_string(props11.subgroupSize) + ")";
     return false;
 }
 
@@ -366,20 +346,10 @@ static void VS_CC BM3DCreate(const VSMap *in, VSMap *out, void *, VSCore *core, 
                 std::to_string(w) + "x" + std::to_string(h));
     }
 
-    DeviceCaps caps;
-    std::string capsError;
-    if (!queryDevice(core, vsapi, caps, capsError))
-        return fail(capsError);
     uint32_t sgSize = 0, pinnedSize = 0;
-    if (!chooseSubgroup(caps, sgSize, pinnedSize, capsError))
-        return fail(capsError);
-    /* VAggregate binds one tall frame per tap plus the output, and a device may allow fewer
-       storage buffers per stage than the driver's 32 slots (Metal has 31). Refused here, where
-       the radius is chosen, rather than at the aggregation step. */
-    if (caps.maxStorageBuffers < static_cast<uint32_t>(2 * p.radius + 2))
-        return fail("radius must be at most " + std::to_string((caps.maxStorageBuffers - 2) / 2) +
-            " on this device, which can bind " + std::to_string(caps.maxStorageBuffers) +
-            " storage buffers per stage and VAggregate needs one per tap plus the output");
+    std::string sgError;
+    if (!chooseSubgroup(core, vsapi, sgSize, pinnedSize, sgError))
+        return fail(sgError);
 
     const int T = 2 * p.radius + 1;
     const int clips = p.final_ ? 2 : 1;
@@ -389,10 +359,8 @@ static void VS_CC BM3DCreate(const VSMap *in, VSMap *out, void *, VSCore *core, 
 
     /* Sizes of the packed layouts, using a 256-byte stride bound that the core's plane stride
        never exceeds; runtime offsets use the actual output plane stride, see packedStride.
-       Checked against the most one binding may cover: the driver binds every buffer whole,
-       and a layout past that limit is not an error the device reports but undefined
-       behaviour, from 4K chroma at radius 11 on. The accumulator bound also covers the tall
-       output plane, the largest thing VAggregate binds. */
+       The driver refuses a size past what one storage buffer binding may cover on the
+       device, which 4K chroma reaches from radius 11 on, so nothing here has to. */
     auto strideBound = [](int width) {
         return (static_cast<VkDeviceSize>(width) * 4 + 255) / 256 * 256;
     };
@@ -406,10 +374,6 @@ static void VS_CC BM3DCreate(const VSMap *in, VSMap *out, void *, VSCore *core, 
         srcBytes = std::max(srcBytes, static_cast<VkDeviceSize>(clips) * numPack * T * h * strideBound(w));
         resBytes = std::max(resBytes, static_cast<VkDeviceSize>(numPack) * T * 2 * h * strideBound(w));
     }
-    if (srcBytes > caps.maxStorageRange || resBytes > caps.maxStorageRange)
-        return fail("the packed source stack (" + std::to_string(srcBytes >> 20) + " MB) or accumulator (" +
-            std::to_string(resBytes >> 20) + " MB) is larger than one storage buffer binding may cover on this device (" +
-            std::to_string(caps.maxStorageRange >> 20) + " MB); lower radius or the frame size");
 
     vsgpu::FilterDesc desc;
     desc.vi = *vi;
@@ -730,16 +694,6 @@ static void VS_CC VAggregateCreate(const VSMap *in, VSMap *out, void *, VSCore *
     if (radius > 15)
         return fail("radius must be at most 15");
     const int T = 2 * radius + 1;
-    /* One binding per tap plus the output, against what the device allows per stage. BM3D
-       refuses such a radius already; this covers a stacked clip from elsewhere. */
-    DeviceCaps caps;
-    std::string capsError;
-    if (!queryDevice(core, vsapi, caps, capsError))
-        return fail(capsError);
-    if (caps.maxStorageBuffers < static_cast<uint32_t>(T + 1))
-        return fail("radius " + std::to_string(radius) + " needs " + std::to_string(T + 1) +
-            " storage buffers in one pass, more than the " + std::to_string(caps.maxStorageBuffers) +
-            " this device allows per stage");
 
     std::array<bool, 3> process = { false, false, false };
     const int numPlaneArgs = vsapi->mapNumElements(in, "planes");

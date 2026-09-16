@@ -97,7 +97,7 @@ bm3dvk.BM3D(clip clip[, clip ref=None, float[] sigma=3.0, int[] block_step=8, in
 
     Otherwise an array of values may be specified for each plane (except `radius`).
 
-    `radius` is limited to 15, and on a device that can bind fewer than 32 storage buffers per stage (Metal allows 31) to what `VAggregate`'s one binding per tap leaves room for; the error message says how many.
+    `radius` is limited to 15, and on a device that binds fewer than 32 storage buffers in one pass (Metal allows 31) to what `VAggregate`'s one binding per tap leaves room for; the core says how many when it refuses.
 
     **Note**: It is generally not recommended to take a large value of `ps_num` as current implementations do not take duplicate block-matching candidates into account during temporary searching, which may leads to regression in denoising quality. This issue is not present in `VapourSynth-BM3D`.
 
@@ -177,7 +177,8 @@ plus `(chroma ? 3 : 1) * (2 * radius + 1) * 2 * size_of_a_single_frame` for the 
 Both come from the core's pooled allocator, count against the VRAM limit
 (`core.max_vram_cache_size`) and are recycled between frames. Each is one buffer, so it is
 also bounded by what a single storage buffer binding may cover on the device, 4 GB at most;
-`BM3D` refuses a radius and frame size past that rather than run with an invalid binding.
+the core refuses a radius and frame size past that at creation rather than run with an
+invalid binding.
 
 Compute complexity:
 

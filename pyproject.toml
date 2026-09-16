@@ -44,6 +44,7 @@ include = [
   "/hatch_build.py",
   "/lib",
   "/pyproject.toml",
+  "/test",
 ]
 
 [tool.hatch.build.targets.wheel]

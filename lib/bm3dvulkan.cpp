@@ -756,7 +756,7 @@ static void VS_CC VAggregateCreate(const VSMap *in, VSMap *out, void *, VSCore *
     const std::array<bool, 3> proc = process;
     desc.frameParamCount = 1;
     desc.prepareFrame = [proc, radius](int n, const VSFrame *const *sources, int numSources,
-        const VSAPI *api, uint32_t *params, std::string &error) {
+        const VSAPI *api, uint32_t *params, std::vector<uint8_t> &, std::string &error) {
         params[0] = static_cast<uint32_t>(n);
         if (radius >= numSources)
             return true;

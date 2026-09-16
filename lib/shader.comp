@@ -74,8 +74,10 @@ bool shfl_up8b(bool v, uint d) {
 float shfl8f(float v, int lane) { return subgroupShuffle(v, (gl_SubgroupInvocationID & ~7u) + uint(lane)); }
 int shfl8i(int v, int lane) { return subgroupShuffle(v, (gl_SubgroupInvocationID & ~7u) + uint(lane)); }
 
-/* Float add emulated with compare-exchange on the uint view, as the original does; core
-   Vulkan has no float atomics and the required feature set adds no extensions. */
+/* Float add emulated with compare-exchange on the uint view, as the original does. Core
+   Vulkan has no float atomics; the core enables VK_EXT_shader_atomic_float where the
+   device offers it, but only as an optional feature that would need a second kernel
+   variant and a device query to use, so the portable path is the only one here. */
 void atomic_add_float(uint idx, float val) {
     uint expected = res[idx];
     for (;;) {

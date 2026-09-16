@@ -55,7 +55,7 @@ set_source_files_properties(bm3dvulkan.cpp PROPERTIES
 target_include_directories(bm3dvulkan PRIVATE
     ${VAPOURSYNTH_INCLUDE_DIRECTORY}
     ${_vulkan_headers}
-    ${CMAKE_CURRENT_SOURCE_DIR}   # gpufilter.h and, for #embed, shader.comp
+    ${CMAKE_CURRENT_SOURCE_DIR}   # gpufilter.h, vsgpuglsl.h and, for #embed, shader.comp
     ${CMAKE_CURRENT_BINARY_DIR}   # the generated shader_comp.h
 )
 

@@ -33,8 +33,8 @@ classifiers = [
 dependencies = ["VapourSynth>=80"]
 
 [project.urls]
-Repository = "https://github.com/Sunflower-Dolls/Vapoursynth-BM3DMETAL"
-Issues = "https://github.com/Sunflower-Dolls/Vapoursynth-BM3DMETAL/issues"
+Repository = "https://github.com/myrsloik/Vapoursynth-BM3Dvk"
+Issues = "https://github.com/myrsloik/Vapoursynth-BM3Dvk/issues"
 
 [tool.hatch.build.targets.sdist]
 include = [

@@ -131,13 +131,19 @@ const char bm3dGlsl[] = {
 #  include "shader_comp.h"
 #endif
 
+/* What the device decides about the layouts here, read once per filter instance. */
+struct DeviceCaps {
+    uint32_t subgroupSize = 0;        /* the kernel's workgroup width */
+    uint32_t pinnedSize = 0;          /* the value to pin, 0 when the device runs that width unpinned */
+    uint32_t maxStorageBuffers = 0;   /* per stage: VAggregate binds one tall frame per tap */
+    VkDeviceSize maxStorageRange = 0; /* the most one binding may cover; the driver binds buffers whole */
+};
+
 /* The kernel runs on any subgroup width that is a multiple of its 8-lane clusters and that
    the workgroup can be sized to match; 32 and 64 cover real hardware. Prefer 32 (better
    register occupancy for a kernel this heavy), fall back to 64 for wave64-only devices.
-   subgroupSize receives the chosen width, pinnedSize the value to pin (0 when the device
-   already runs that width unpinned). BM3DVK_FORCE_SUBGROUP=32|64 overrides for testing. */
-bool chooseSubgroup(VSCore *core, const VSAPI *vsapi, uint32_t &subgroupSize, uint32_t &pinnedSize,
-    std::string &error) {
+   BM3DVK_FORCE_SUBGROUP=32|64 overrides for testing. */
+bool queryDevice(VSCore *core, const VSAPI *vsapi, DeviceCaps &caps, std::string &error) {
     const VSVULKANAPI *vkapi = vsapi->getVulkanAPI();
     if (!vkapi) {
         error = "the Vulkan API is not available";
@@ -160,6 +166,8 @@ bool chooseSubgroup(VSCore *core, const VSAPI *vsapi, uint32_t &subgroupSize, ui
     VkPhysicalDeviceProperties2 props2 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2 };
     props2.pNext = &props11;
     vk->vkGetPhysicalDeviceProperties2(handles.physicalDevice, &props2);
+    caps.maxStorageBuffers = props2.properties.limits.maxPerStageDescriptorStorageBuffers;
+    caps.maxStorageRange = props2.properties.limits.maxStorageBufferRange;
 
     const bool canPin = (props13.requiredSubgroupSizeStages & VK_SHADER_STAGE_COMPUTE_BIT) != 0;
     uint32_t candidates[2] = { 32, 64 };
@@ -175,13 +183,13 @@ bool chooseSubgroup(VSCore *core, const VSAPI *vsapi, uint32_t &subgroupSize, ui
     for (int i = 0; i < numCandidates; ++i) {
         const uint32_t c = candidates[i];
         if (canPin && props13.minSubgroupSize <= c && c <= props13.maxSubgroupSize) {
-            subgroupSize = c;
-            pinnedSize = c;
+            caps.subgroupSize = c;
+            caps.pinnedSize = c;
             return true;
         }
         if (props11.subgroupSize == c) {
-            subgroupSize = c;
-            pinnedSize = 0;
+            caps.subgroupSize = c;
+            caps.pinnedSize = 0;
             return true;
         }
     }
@@ -217,6 +225,26 @@ struct PMeta {
    shape share a stride. */
 uint32_t packedStride(const vsgpu::PassInfo &info) { return info.dstStrideElements(); }
 
+/* sigma as BM3D reads it, unscaled: a missing entry repeats the previous one, the first
+   defaulting to 3, a negative value is refused, and a plane is denoised when its value
+   reaches float epsilon. BM3Dv2 derives its plane list through the same call, so the two
+   cannot drift apart on which planes BM3D actually touched. */
+bool parseSigma(const VSMap *in, const VSAPI *vsapi, std::array<float, 3> &sigma,
+    std::array<bool, 3> &process, std::string &error) {
+    for (int i = 0; i < 3; ++i) {
+        int err = 0;
+        sigma[i] = static_cast<float>(vsapi->mapGetFloat(in, "sigma", i, &err));
+        if (err)
+            sigma[i] = (i == 0) ? 3.0f : sigma[i - 1];
+        if (sigma[i] < 0.0f) {
+            error = "sigma must be non-negative";
+            return false;
+        }
+        process[i] = sigma[i] >= std::numeric_limits<float>::epsilon();
+    }
+    return true;
+}
+
 static void VS_CC BM3DCreate(const VSMap *in, VSMap *out, void *, VSCore *core, const VSAPI *vsapi) noexcept {
     VSNode *node = vsapi->mapGetNode(in, "clip", 0, nullptr);
     const VSVideoInfo *vi = vsapi->getVideoInfo(node);
@@ -244,18 +272,12 @@ static void VS_CC BM3DCreate(const VSMap *in, VSMap *out, void *, VSCore *core, 
             return fail("ref clip properties must match input clip");
     }
 
-    for (int i = 0; i < 3; ++i) {
-        p.sigma[i] = static_cast<float>(vsapi->mapGetFloat(in, "sigma", i, &err));
-        if (err)
-            p.sigma[i] = (i == 0) ? 3.0f : p.sigma[i - 1];
-        if (p.sigma[i] < 0.0f)
-            return fail("sigma must be non-negative");
-        p.process[i] = p.sigma[i] >= std::numeric_limits<float>::epsilon();
-    }
-    /* Scaled only once all three are known: a missing entry defaults to the previous one,
-       which has to be the value the user gave and not an already scaled copy of it. A plane
-       that is not processed gets exactly zero, which is what the chroma kernel tests for, so
-       the kernel never disagrees with the epsilon decision made above on the unscaled value. */
+    std::string sigmaError;
+    if (!parseSigma(in, vsapi, p.sigma, p.process, sigmaError))
+        return fail(sigmaError);
+    /* A plane that is not processed gets exactly zero, which is what the chroma kernel tests
+       for, so the kernel never disagrees with the epsilon decision parseSigma made on the
+       unscaled value. */
     for (int i = 0; i < 3; ++i)
         p.sigma[i] = p.process[i] ? p.sigma[i] * ((3.0f / 4.0f) / 255.0f * 64.0f * (p.final_ ? 1.0f : 2.7f)) : 0.0f;
     for (int i = 0; i < 3; ++i) {
@@ -332,16 +354,48 @@ static void VS_CC BM3DCreate(const VSMap *in, VSMap *out, void *, VSCore *core, 
                 std::to_string(w) + "x" + std::to_string(h));
     }
 
-    uint32_t sgSize = 0, pinnedSize = 0;
-    std::string sgError;
-    if (!chooseSubgroup(core, vsapi, sgSize, pinnedSize, sgError))
-        return fail(sgError);
+    DeviceCaps caps;
+    std::string capsError;
+    if (!queryDevice(core, vsapi, caps, capsError))
+        return fail(capsError);
+    const uint32_t sgSize = caps.subgroupSize, pinnedSize = caps.pinnedSize;
+    /* VAggregate binds one tall frame per tap plus the output, and a device may allow fewer
+       storage buffers per stage than the driver's 32 slots (Metal has 31). Refused here, where
+       the radius is chosen, rather than at the aggregation step. */
+    if (caps.maxStorageBuffers < static_cast<uint32_t>(2 * p.radius + 2))
+        return fail("radius must be at most " + std::to_string((caps.maxStorageBuffers - 2) / 2) +
+            " on this device, which can bind " + std::to_string(caps.maxStorageBuffers) +
+            " storage buffers per stage and VAggregate needs one per tap plus the output");
 
     const int T = 2 * p.radius + 1;
     const int clips = p.final_ ? 2 : 1;
     const int numPack = p.chroma ? 3 : 1;
     const bool temporal = p.radius > 0;
     const bool resIsOutput = temporal && !p.chroma;
+
+    /* Sizes of the packed layouts, using a 256-byte stride bound that the core's plane stride
+       never exceeds; runtime offsets use the actual output plane stride, see packedStride.
+       Checked against the most one binding may cover: the driver binds every buffer whole,
+       and a layout past that limit is not an error the device reports but undefined
+       behaviour, from 4K chroma at radius 11 on. The accumulator bound also covers the tall
+       output plane, the largest thing VAggregate binds. */
+    auto strideBound = [](int width) {
+        return (static_cast<VkDeviceSize>(width) * 4 + 255) / 256 * 256;
+    };
+    VkDeviceSize srcBytes = 0, resBytes = 0;
+    for (int pl = 0; pl < numPlanes; ++pl) {
+        const bool heavyHere = p.chroma ? (pl == heavyGate) : p.process[pl];
+        if (!heavyHere)
+            continue;
+        const int w = pl ? vi->width >> vi->format.subSamplingW : vi->width;
+        const int h = pl ? vi->height >> vi->format.subSamplingH : vi->height;
+        srcBytes = std::max(srcBytes, static_cast<VkDeviceSize>(clips) * numPack * T * h * strideBound(w));
+        resBytes = std::max(resBytes, static_cast<VkDeviceSize>(numPack) * T * 2 * h * strideBound(w));
+    }
+    if (srcBytes > caps.maxStorageRange || resBytes > caps.maxStorageRange)
+        return fail("the packed source stack (" + std::to_string(srcBytes >> 20) + " MB) or accumulator (" +
+            std::to_string(resBytes >> 20) + " MB) is larger than one storage buffer binding may cover on this device (" +
+            std::to_string(caps.maxStorageRange >> 20) + " MB); lower radius or the frame size");
 
     vsgpu::FilterDesc desc;
     desc.vi = *vi;
@@ -396,22 +450,7 @@ static void VS_CC BM3DCreate(const VSMap *in, VSMap *out, void *, VSCore *core, 
     }
 
     /* Scratch 0 is the packed source stack; scratch 1 the accumulator, except for
-       non-chroma temporal where the tall output plane itself accumulates. Sizes use a
-       256-byte stride bound, which the core's plane stride never exceeds; runtime offsets
-       use the actual output plane stride, see packedStride. */
-    auto strideBound = [](int width) {
-        return (static_cast<VkDeviceSize>(width) * 4 + 255) / 256 * 256;
-    };
-    VkDeviceSize srcBytes = 0, resBytes = 0;
-    for (int pl = 0; pl < numPlanes; ++pl) {
-        const bool heavyHere = p.chroma ? (pl == heavyGate) : p.process[pl];
-        if (!heavyHere)
-            continue;
-        const int w = pl ? vi->width >> vi->format.subSamplingW : vi->width;
-        const int h = pl ? vi->height >> vi->format.subSamplingH : vi->height;
-        srcBytes = std::max(srcBytes, static_cast<VkDeviceSize>(clips) * numPack * T * h * strideBound(w));
-        resBytes = std::max(resBytes, static_cast<VkDeviceSize>(numPack) * T * 2 * h * strideBound(w));
-    }
+       non-chroma temporal where the tall output plane itself accumulates. */
     desc.scratchCount = resIsOutput ? 1 : 2;
     desc.scratchDefs.push_back({ srcBytes, 0 });
     if (!resIsOutput)
@@ -468,14 +507,18 @@ static void VS_CC BM3DCreate(const VSMap *in, VSMap *out, void *, VSCore *core, 
     }
 
     /* Pack the source stack: ref clip first in final mode, then per packed plane, per tap,
-       exactly the Metal d_src layout. Slots advance positionally even for planes the
-       kernel will skip. Each copy reads a frame and writes its own slot, disjoint from the
-       zero pass's buffer and from every other slot, so none of them needs the barrier the
-       driver would otherwise put in front of it -- up to 186 of them in chroma final mode
-       at the largest radius. */
+       exactly the Metal d_src layout. Slots stay positional even for planes the kernel will
+       skip, but those are not filled: a chroma plane with sigma 0 is never read, the one
+       exception being the first clip's luma, which block matching reads whatever its sigma.
+       Each copy reads a frame and writes its own slot, disjoint from the zero pass's buffer
+       and from every other slot, so none of them needs the barrier the driver would
+       otherwise put in front of it -- up to 186 of them in chroma final mode at the largest
+       radius. */
     for (int outer = 0; outer < clips; ++outer) {
         const int clipIdx = p.final_ ? (outer == 0 ? 1 : 0) : 0;
         for (int pack = 0; pack < numPack; ++pack) {
+            if (p.chroma && !p.process[pack] && !(pack == 0 && outer == 0))
+                continue;
             for (int tap = 0; tap < T; ++tap) {
                 vsgpu::Pass pass;
                 pass.program = 1;
@@ -673,6 +716,16 @@ static void VS_CC VAggregateCreate(const VSMap *in, VSMap *out, void *, VSCore *
     if (radius > 15)
         return fail("radius must be at most 15");
     const int T = 2 * radius + 1;
+    /* One binding per tap plus the output, against what the device allows per stage. BM3D
+       refuses such a radius already; this covers a stacked clip from elsewhere. */
+    DeviceCaps caps;
+    std::string capsError;
+    if (!queryDevice(core, vsapi, caps, capsError))
+        return fail(capsError);
+    if (caps.maxStorageBuffers < static_cast<uint32_t>(T + 1))
+        return fail("radius " + std::to_string(radius) + " needs " + std::to_string(T + 1) +
+            " storage buffers in one pass, more than the " + std::to_string(caps.maxStorageBuffers) +
+            " this device allows per stage");
 
     std::array<bool, 3> process = { false, false, false };
     const int numPlaneArgs = vsapi->mapNumElements(in, "planes");
@@ -813,19 +866,15 @@ static void VS_CC VAggregateCreate(const VSMap *in, VSMap *out, void *, VSCore *
 
 /* Unchanged invoke composition from the original: BM3D, then VAggregate when temporal. */
 static void VS_CC BM3Dv2Create(const VSMap *in, VSMap *out, void *, VSCore *, const VSAPI *vsapi) noexcept {
+    /* The same reading BM3D will make, so the plane list handed to VAggregate is exactly
+       the set BM3D denoises; a refused sigma is refused here, before the all-zero shortcut
+       could hand back the clip. */
+    std::array<float, 3> sigma;
     std::array<bool, 3> process;
-    process.fill(true);
-    const int numSigma = vsapi->mapNumElements(in, "sigma");
-    for (int i = 0; i < std::min(3, numSigma); ++i) {
-        /* Only a zero skips the plane; a negative value stays "processed" so that the BM3D
-           invoke below rejects it rather than the all-zero shortcut returning the clip. */
-        const double s = vsapi->mapGetFloat(in, "sigma", i, nullptr);
-        if (s >= 0.0 && s < std::numeric_limits<float>::epsilon())
-            process[i] = false;
-    }
-    if (numSigma > 0) {
-        for (int i = numSigma; i < 3; ++i)
-            process[i] = process[i - 1];
+    std::string sigmaError;
+    if (!parseSigma(in, vsapi, sigma, process, sigmaError)) {
+        vsapi->mapSetError(out, ("BM3Dv2: " + sigmaError).c_str());
+        return;
     }
 
     VSNode *src = vsapi->mapGetNode(in, "clip", 0, nullptr);

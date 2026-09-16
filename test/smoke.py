@@ -18,13 +18,19 @@ import vapoursynth as vs
 
 class _NoAutoload(vs.EnvironmentPolicy):
     def __init__(self):
+        self._api = None
         self._env = None
 
     def on_policy_registered(self, special_api):
+        self._api = special_api
         self._env = special_api.create_environment(vs.DISABLE_AUTO_LOADING)
 
     def on_policy_cleared(self):
+        # As the stock policy does: torn down through the API, so the core's destroy
+        # callbacks run instead of garbage collection finding the environment later.
+        self._api.destroy_environment(self._env)
         self._env = None
+        self._api = None
 
     def get_current_environment(self):
         return self._env
@@ -35,7 +41,7 @@ class _NoAutoload(vs.EnvironmentPolicy):
         return prev
 
     def is_alive(self, environment):
-        return True
+        return environment is self._env
 
 
 if len(sys.argv) > 1:
@@ -114,6 +120,7 @@ for name, kw in variants + [
     ("spatial sigma[0]=0", {"radius": 0, "sigma": [0, 8, 8]}),
     ("temporal sigma[1]=0", {"radius": 1, "sigma": [8, 0, 8]}),
     ("temporal chroma sigma[2]=0", {"radius": 1, "chroma": True, "sigma": [8, 8, 0]}),
+    ("temporal chroma sigma[0]=0", {"radius": 1, "chroma": True, "sigma": [0, 8, 8]}),
 ]:
     kw = {"sigma": 8, **kw}
     sigma = kw["sigma"] if isinstance(kw["sigma"], list) else [kw["sigma"]] * 3

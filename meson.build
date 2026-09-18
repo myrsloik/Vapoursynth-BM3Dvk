@@ -1,4 +1,4 @@
-project('VapourSynth-BM3DVulkan', 'cpp',
+project('VapourSynth-BM3Dvk', 'cpp',
     default_options: ['buildtype=release', 'b_ndebug=if-release', 'cpp_std=c++20'],
     license: 'GPL-3.0-or-later',
     license_files: 'LICENSE',
@@ -69,8 +69,8 @@ endif
 # A module rather than a library: nothing links against a plugin. Meson still writes an
 # import library beside it on Windows, which pyproject.toml keeps out of the wheel, and gives
 # modules a .so suffix on macOS, where the core looks for .dylib.
-shared_module('bm3dvulkan',
-    files('lib/bm3dvulkan.cpp'),
+shared_module('bm3dvk',
+    files('lib/bm3dvk.cpp'),
     shader_header,
     cpp_args: cpp_args,
     dependencies: vulkan_deps,

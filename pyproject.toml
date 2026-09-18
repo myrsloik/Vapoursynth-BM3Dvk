@@ -3,7 +3,7 @@ requires = ["meson-python", "VapourSynth>=80"]
 build-backend = "mesonpy"
 
 [project]
-name = "vapoursynth-bm3dvulkan"
+name = "vapoursynth-bm3dvk"
 description = "BM3D denoising filter for VapourSynth, running on the core's Vulkan device"
 readme = "README.md"
 requires-python = ">=3.12"

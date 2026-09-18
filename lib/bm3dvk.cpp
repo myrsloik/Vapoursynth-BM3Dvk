@@ -21,8 +21,8 @@
  * Built by meson (see ../meson.build). By hand, after tools/embed_shader.py has turned
  * shader.comp into shader_comp.h:
  *   clang-cl /LD /MD /O2 /EHsc /std:c++20 /bigobj /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
- *     bm3dvulkan.cpp /I<this dir> /I<dir of shader_comp.h> /I<vapoursynth include> ^
- *     /I<vulkan sdk include> /Fe:bm3dvulkan.dll
+ *     bm3dvk.cpp /I<this dir> /I<dir of shader_comp.h> /I<vapoursynth include> ^
+ *     /I<vulkan sdk include> /Fe:bm3dvk.dll
  */
 
 #define VS_USE_API_43
@@ -887,7 +887,7 @@ static void VS_CC BM3Dv2Create(const VSMap *in, VSMap *out, void *, VSCore *, co
 VS_EXTERNAL_API(void)
 VapourSynthPluginInit2(VSPlugin *plugin, const VSPLUGINAPI *vspapi) {
     myself = plugin;
-    vspapi->configPlugin("com.sunflower-dolls.bm3dvulkan", "bm3dvk",
+    vspapi->configPlugin("com.sunflower-dolls.bm3dvk", "bm3dvk",
         "BM3D algorithm on the VapourSynth Vulkan device",
         VS_MAKE_VERSION(1, 0), VAPOURSYNTH_API_VERSION, 0, plugin);
     const char *bm3dArgs =

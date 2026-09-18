@@ -1,4 +1,4 @@
-# VapourSynth-BM3DVulkan
+# VapourSynth-BM3Dvk
 
 Copyright© 2021 WolframRhodium
 
@@ -33,7 +33,7 @@ by way of the Metal implementation this repository previously held.
 ## Installation
 
 ```bash
-python3 -m pip install -U vapoursynth vapoursynth-bm3dvulkan
+python3 -m pip install -U vapoursynth vapoursynth-bm3dvk
 vapoursynth config
 ```
 
@@ -201,8 +201,8 @@ meson install -C build
 ```
 
 `meson install` puts the plugin into the Python package's `vapoursynth/plugins` directory,
-where it is autoloaded; `meson compile` alone leaves it (`libbm3dvulkan.so`, `bm3dvulkan.dll`
-or `libbm3dvulkan.dylib`) in `build`, to copy wherever you like. `python3 -m pip install .`
+where it is autoloaded; `meson compile` alone leaves it (`libbm3dvk.so`, `bm3dvk.dll`
+or `libbm3dvk.dylib`) in `build`, to copy wherever you like. `python3 -m pip install .`
 builds the same thing as a wheel through meson-python.
 
 The Vulkan headers are looked for as the Khronos `VulkanHeaders` package, through the loader's

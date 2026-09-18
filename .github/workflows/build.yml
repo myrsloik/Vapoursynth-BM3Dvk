@@ -67,7 +67,7 @@ jobs:
 
     - uses: actions/upload-artifact@v7
       with:
-        name: bm3dvulkan-${{ matrix.arch }}
+        name: bm3dvk-${{ matrix.arch }}
         path: dist
 
   build-windows-wheel:
@@ -100,12 +100,12 @@ jobs:
 
     - uses: actions/upload-artifact@v7
       with:
-        name: bm3dvulkan-sdist
+        name: bm3dvk-sdist
         path: dist/*.tar.gz
 
     - uses: actions/upload-artifact@v7
       with:
-        name: bm3dvulkan-win_amd64
+        name: bm3dvk-win_amd64
         path: dist/*.whl
 
   publish:

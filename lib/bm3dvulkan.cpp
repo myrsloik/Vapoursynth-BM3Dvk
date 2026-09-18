@@ -18,10 +18,11 @@
  * owns device selection, pipelining depth comes from the exec pool, and the unprocessed
  * planes of the tall temporal output are always zeroed.
  *
- * Built by CMake (see ../CMakeLists.txt), or by hand with a compiler that has C23 #embed:
+ * Built by meson (see ../meson.build). By hand, after tools/embed_shader.py has turned
+ * shader.comp into shader_comp.h:
  *   clang-cl /LD /MD /O2 /EHsc /std:c++20 /bigobj /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
- *     bm3dvulkan.cpp /I<this dir> /I<vapoursynth include> /I<vulkan sdk include> ^
- *     /Fe:bm3dvulkan.dll
+ *     bm3dvulkan.cpp /I<this dir> /I<dir of shader_comp.h> /I<vapoursynth include> ^
+ *     /I<vulkan sdk include> /Fe:bm3dvulkan.dll
  */
 
 #define VS_USE_API_43
@@ -108,28 +109,12 @@ void main() {
 }
 )";
 
-/* The kernel source ships inside the binary. #embed is the direct route and needs no build
-   step, but it is C23 (clang 19+, gcc 15+, not MSVC), so CMake also generates
-   shader_comp.h -- a raw string literal -- and that is used wherever #embed is missing.
-   Define BM3DVK_NO_EMBED to force the generated header even where #embed exists, which is
-   how the fallback gets exercised on a compiler that would not otherwise take it. */
-#if defined(__has_embed) && !defined(BM3DVK_NO_EMBED)
-#  if __has_embed("shader.comp")
-#    define BM3DVK_HAVE_EMBED 1
-#  endif
-#endif
-
-#ifdef BM3DVK_HAVE_EMBED
-const char bm3dGlsl[] = {
-#  pragma clang diagnostic push
-#  pragma clang diagnostic ignored "-Wc23-extensions"
-#embed "shader.comp"
-#  pragma clang diagnostic pop
-    , '\0'
-};
-#else
-#  include "shader_comp.h"
-#endif
+/* The kernel source ships inside the binary: shader_comp.h holds shader.comp as a raw string
+   literal, generated at build time by tools/embed_shader.py. A build step rather than C23
+   #embed because meson runs one anyway, and a header every compiler includes is a dependency
+   every build tracks, where an embedded file only rebuilds on the compilers that list it in
+   their depfile. */
+#include "shader_comp.h"
 
 /* The kernel runs on any subgroup width that is a multiple of its 8-lane clusters and that
    the workgroup can be sized to match; 32 and 64 cover real hardware. Prefer 32 (better

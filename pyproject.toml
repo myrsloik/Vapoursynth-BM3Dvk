@@ -1,15 +1,9 @@
 [build-system]
-requires = [
-  "cmake>=3.20",
-  "hatchling>=1.26",
-  "packaging>=24",
-  "VapourSynth>=80",
-]
-build-backend = "hatchling.build"
+requires = ["meson-python", "VapourSynth>=80"]
+build-backend = "mesonpy"
 
 [project]
 name = "vapoursynth-bm3dvulkan"
-version = "1.0.0"
 description = "BM3D denoising filter for VapourSynth, running on the core's Vulkan device"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -21,7 +15,6 @@ classifiers = [
   "Environment :: GPU",
   "Environment :: Plugins",
   "Intended Audience :: End Users/Desktop",
-  "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
   "Natural Language :: English",
   "Operating System :: MacOS",
   "Operating System :: Microsoft :: Windows",
@@ -31,24 +24,12 @@ classifiers = [
   "Topic :: Multimedia :: Video",
 ]
 dependencies = ["VapourSynth>=80"]
+dynamic = ["version"]
 
 [project.urls]
 Repository = "https://github.com/myrsloik/Vapoursynth-BM3Dvk"
 Issues = "https://github.com/myrsloik/Vapoursynth-BM3Dvk/issues"
 
-[tool.hatch.build.targets.sdist]
-include = [
-  "/CMakeLists.txt",
-  "/LICENSE",
-  "/README.md",
-  "/hatch_build.py",
-  "/lib",
-  "/pyproject.toml",
-  "/test",
-]
-
-[tool.hatch.build.targets.wheel]
-packages = []
-
-[tool.hatch.build.targets.wheel.hooks.custom]
-path = "hatch_build.py"
+# The import libraries meson writes beside the module on Windows; nothing links a plugin.
+[tool.meson-python.wheel]
+exclude = ["*.lib", "*.dll.a"]

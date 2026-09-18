@@ -9,5 +9,4 @@ cuda-impl/*
 benchmark.py
 *.gputrace
 dist/*
-vapoursynth/*
 __pycache__/*

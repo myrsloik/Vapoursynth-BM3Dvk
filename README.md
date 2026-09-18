@@ -37,8 +37,8 @@ python3 -m pip install -U vapoursynth vapoursynth-bm3dvulkan
 vapoursynth config
 ```
 
-The wheel installs the plugin into VapourSynth's Python package plugin directory together
-with a `manifest.vs` for autoloading.
+The wheel installs the plugin into VapourSynth's Python package plugin directory, where it
+is autoloaded.
 
 ## Parameters
 
@@ -186,33 +186,35 @@ Compute complexity:
 
 ## Compilation
 
-Requires CMake 3.20 or later, a C++20 compiler, VapourSynth's Python package (R80+, for its
+Requires `meson`, `ninja`, a C++20 compiler, VapourSynth's Python package (R80+, for its
 headers) and the Vulkan headers. Only the headers are needed — the plugin does not link
 against the Vulkan loader, because the core hands it every entry point already resolved.
 
 ```bash
-python3 -m pip install -U "VapourSynth>=80"
+python3 -m pip install -U "VapourSynth>=80" meson ninja
 ```
 
 ```bash
-cmake -S . -B build -D CMAKE_BUILD_TYPE=Release
-cmake --build build --config Release
+meson setup build
+meson compile -C build
+meson install -C build
 ```
 
-The compiled plugin (`libbm3dvulkan.so`, `bm3dvulkan.dll` or `libbm3dvulkan.dylib`) lands in
-`build/lib`. Copy it to your VapourSynth plugins directory.
+`meson install` puts the plugin into the Python package's `vapoursynth/plugins` directory,
+where it is autoloaded; `meson compile` alone leaves it (`libbm3dvulkan.so`, `bm3dvulkan.dll`
+or `libbm3dvulkan.dylib`) in `build`, to copy wherever you like. `python3 -m pip install .`
+builds the same thing as a wheel through meson-python.
 
-If CMake cannot locate the headers automatically, pass
-`-D VAPOURSYNTH_INCLUDE_DIRECTORY=/path/to/vapoursynth/include` and/or
-`-D VULKAN_INCLUDE_DIRECTORY=/path/to/vulkan/include`.
+The Vulkan headers are looked for as the Khronos `VulkanHeaders` package, through the loader's
+`vulkan.pc` or `VULKAN_SDK`, and on the compiler's default path; point `CMAKE_PREFIX_PATH` or
+`VULKAN_SDK` at an install meson does not find on its own.
 
 `python3 test/smoke.py [path/to/plugin]` runs every variant of the kernel on the core's
 device and checks the results; without a path it tests the plugin VapourSynth autoloads.
 It needs numpy.
 
-The kernel is compiled into the binary with C23 `#embed` where the compiler supports it
-(clang 19+, gcc 15+) and through a CMake-generated header otherwise, so MSVC and older gcc
-build without a separate step. Define `BM3DVK_NO_EMBED` to force the generated header.
+The kernel is compiled into the binary as a raw string literal, `shader_comp.h`, which
+`tools/embed_shader.py` generates from `lib/shader.comp` as part of the build.
 
 ## License
 
